@@ -1,5 +1,6 @@
 package com.codex.remote
 
+import com.codex.remote.data.rpc.RpcException
 import com.codex.remote.domain.AppUiState
 import com.codex.remote.domain.ComposerMentionKind
 import com.codex.remote.domain.RemotePlugin
@@ -19,6 +20,27 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ComposerStateTest {
+    @Test
+    fun optionalRpcMethodDetectionOnlyIgnoresMissingCapabilities() {
+        assertTrue(RpcException("Method not found", -32601).isUnsupportedRpcMethod("account/rateLimits/read"))
+        assertTrue(
+            RpcException("Unsupported method: account/rateLimits/read")
+                .isUnsupportedRpcMethod("account/rateLimits/read"),
+        )
+        assertTrue(
+            RpcException("Unsupported method: thread/goal/get")
+                .isUnsupportedRpcMethod("thread/goal/get"),
+        )
+        assertFalse(
+            RpcException("Unsupported method: thread/read")
+                .isUnsupportedRpcMethod("account/rateLimits/read"),
+        )
+        assertFalse(
+            RpcException("Remote connection closed")
+                .isUnsupportedRpcMethod("account/rateLimits/read"),
+        )
+    }
+
     @Test
     fun manuallyTypedKnownTokensResolveToStructuredRemoteInputs() {
         val state = AppUiState(
@@ -77,7 +99,21 @@ class ComposerStateTest {
 
         assertTrue(state.acceptsThreadEvent("thread-a"))
         assertFalse(state.acceptsThreadEvent("thread-b"))
-        assertTrue(state.acceptsThreadEvent(null))
+        assertFalse(state.acceptsThreadEvent(null))
+    }
+
+    @Test
+    fun completingATurnClosesEveryRunningIntermediateItem() {
+        val timeline = listOf(
+            TimelineItem("reasoning", TimelineKind.REASONING, status = "inProgress"),
+            TimelineItem("command", TimelineKind.COMMAND, status = "running"),
+            TimelineItem("tool", TimelineKind.TOOL, status = "started"),
+            TimelineItem("answer", TimelineKind.AGENT, status = "completed"),
+        )
+
+        val completed = timeline.withRunningItemsCompleted()
+
+        assertEquals(listOf("completed", "completed", "completed", "completed"), completed.map { it.status })
     }
 
     private fun thread(id: String, title: String, updatedAt: Long) = RemoteThread(

@@ -1,15 +1,19 @@
 package com.codex.remote.ui.screens
 
 import android.content.Context
+import android.text.method.LinkMovementMethod
 import android.net.Uri
 import android.provider.OpenableColumns
 import android.util.Base64
+import android.widget.TextView
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -39,7 +43,6 @@ import androidx.compose.foundation.layout.windowInsetsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.selection.selectable
 import androidx.compose.foundation.shape.CircleShape
@@ -124,16 +127,24 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
+import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.StrokeCap
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.platform.LocalUriHandler
+import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.viewinterop.AndroidView
 import androidx.compose.ui.window.PopupProperties
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -148,15 +159,17 @@ import com.codex.remote.domain.ComposerMention
 import com.codex.remote.domain.ComposerMentionKind
 import com.codex.remote.domain.ComposerImageAttachment
 import com.codex.remote.domain.ComposerTriggerKind
+import com.codex.remote.domain.FileChangeSummary
+import com.codex.remote.domain.PermissionMode
 import com.codex.remote.domain.RemoteProject
 import com.codex.remote.domain.RemoteDeviceLogin
+import com.codex.remote.domain.RemoteThreadTokenUsage
 import com.codex.remote.domain.RemoteThread
 import com.codex.remote.domain.ReviewTargetKind
 import com.codex.remote.domain.TimelineItem
 import com.codex.remote.domain.TimelineKind
 import com.codex.remote.domain.ThreadGoal
 import com.codex.remote.domain.ThreadGoalStatus
-import com.codex.remote.domain.WorkspacePane
 import com.codex.remote.domain.composerToken
 import com.codex.remote.domain.findComposerTrigger
 import com.codex.remote.domain.replaceComposerTrigger
@@ -164,6 +177,11 @@ import com.codex.remote.ui.theme.CodexGreen
 import com.codex.remote.ui.theme.DiffGreen
 import com.codex.remote.ui.theme.DiffRed
 import com.codex.remote.ui.theme.MonoText
+import io.noties.markwon.Markwon
+import io.noties.markwon.ext.latex.JLatexMathPlugin
+import io.noties.markwon.ext.strikethrough.StrikethroughPlugin
+import io.noties.markwon.ext.tables.TablePlugin
+import io.noties.markwon.inlineparser.MarkwonInlineParserPlugin
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.collect
@@ -208,12 +226,11 @@ fun WorkspaceScreen(
     onSetServiceTier: (String?) -> Unit,
     onSetCollaborationMode: (String) -> Unit,
     onSetPermissionProfile: (String?) -> Unit,
-    onSetApprovalPolicy: (String) -> Unit,
+    onSetPermissionMode: (PermissionMode) -> Unit,
     onLoadRemoteDirectory: (String) -> Unit,
     onClearRemoteDirectory: () -> Unit,
     onStartLogin: () -> Unit,
     onCancelLogin: () -> Unit,
-    onSetPane: (WorkspacePane) -> Unit,
     onApproval: (String, Map<String, List<String>>) -> Unit,
     onTrustHostKey: () -> Unit,
     onRejectHostKey: () -> Unit,
@@ -283,11 +300,10 @@ fun WorkspaceScreen(
                     onSetServiceTier = onSetServiceTier,
                     onSetCollaborationMode = onSetCollaborationMode,
                     onSetPermissionProfile = onSetPermissionProfile,
-                    onSetApprovalPolicy = onSetApprovalPolicy,
+                    onSetPermissionMode = onSetPermissionMode,
                     onLoadRemoteDirectory = onLoadRemoteDirectory,
                     onClearRemoteDirectory = onClearRemoteDirectory,
                     onStartLogin = onStartLogin,
-                    onSetPane = onSetPane,
                     onOpenConnections = onOpenConnections,
                     onDismissNotice = onDismissNotice,
                     modifier = Modifier.weight(1f),
@@ -360,11 +376,10 @@ fun WorkspaceScreen(
                     onSetServiceTier = onSetServiceTier,
                     onSetCollaborationMode = onSetCollaborationMode,
                     onSetPermissionProfile = onSetPermissionProfile,
-                    onSetApprovalPolicy = onSetApprovalPolicy,
+                    onSetPermissionMode = onSetPermissionMode,
                     onLoadRemoteDirectory = onLoadRemoteDirectory,
                     onClearRemoteDirectory = onClearRemoteDirectory,
                     onStartLogin = onStartLogin,
-                    onSetPane = onSetPane,
                     onOpenConnections = onOpenConnections,
                     onDismissNotice = onDismissNotice,
                     modifier = Modifier.fillMaxSize(),
@@ -780,11 +795,10 @@ private fun WorkspaceContent(
     onSetServiceTier: (String?) -> Unit,
     onSetCollaborationMode: (String) -> Unit,
     onSetPermissionProfile: (String?) -> Unit,
-    onSetApprovalPolicy: (String) -> Unit,
+    onSetPermissionMode: (PermissionMode) -> Unit,
     onLoadRemoteDirectory: (String) -> Unit,
     onClearRemoteDirectory: () -> Unit,
     onStartLogin: () -> Unit,
-    onSetPane: (WorkspacePane) -> Unit,
     onOpenConnections: () -> Unit,
     onDismissNotice: () -> Unit,
     modifier: Modifier,
@@ -797,14 +811,13 @@ private fun WorkspaceContent(
     var showStatusDialog by remember { mutableStateOf(false) }
     var showFeedbackDialog by remember { mutableStateOf(false) }
     val conversationKey = state.selectedThreadId ?: "project:${state.selectedProjectPath.orEmpty()}"
-    val conversationListState = rememberLazyListState()
+    val conversationListState = remember(conversationKey) { LazyListState() }
     var followLatest by remember(conversationKey) { mutableStateOf(true) }
     var hasPositionedConversation by remember(conversationKey) { mutableStateOf(false) }
     val currentThread = state.threads.firstOrNull { it.id == state.selectedThreadId }
     val canCompose = state.connectionStatus == ConnectionStatus.CONNECTED &&
         state.remoteAccount?.canRunCodex == true &&
         state.models.isNotEmpty() &&
-        state.activePane == WorkspacePane.CHAT &&
         (state.selectedProjectPath?.isNotBlank() == true || state.selectedThreadId != null)
     LaunchedEffect(state.notice) {
         state.notice?.let {
@@ -847,7 +860,6 @@ private fun WorkspaceContent(
                             )
                             ConnectionIndicator(state)
                         }
-                        PaneSwitcher(state.activePane, state.aggregatedDiff.isNotBlank(), onSetPane)
                         if (currentThread != null) {
                             ThreadHeaderOverflow(
                                 onRename = onRenameCurrentThread,
@@ -893,7 +905,7 @@ private fun WorkspaceContent(
                     loading = false,
                     modifier = Modifier.fillMaxSize().padding(padding),
                 )
-                state.activePane == WorkspacePane.CHAT -> Column(Modifier.fillMaxSize().padding(padding)) {
+                else -> Column(Modifier.fillMaxSize().padding(padding)) {
                     Conversation(
                         state = state,
                         listState = conversationListState,
@@ -942,14 +954,13 @@ private fun WorkspaceContent(
                             onSetServiceTier = onSetServiceTier,
                             onSetCollaborationMode = onSetCollaborationMode,
                             onSetPermissionProfile = onSetPermissionProfile,
-                            onSetApprovalPolicy = onSetApprovalPolicy,
+                            onSetPermissionMode = onSetPermissionMode,
                             onLoadRemoteDirectory = onLoadRemoteDirectory,
                             onClearRemoteDirectory = onClearRemoteDirectory,
                             modifier = Modifier.fillMaxWidth(),
                         )
                     }
                 }
-                else -> DiffView(state.aggregatedDiff, Modifier.fillMaxSize().padding(padding))
             }
             ConnectionStatus.DISCONNECTED -> ConnectionState(
                 icon = Icons.Outlined.Computer,
@@ -1070,29 +1081,60 @@ private fun ConnectionIndicator(state: AppUiState) {
     }
 }
 
-@Composable
-private fun PaneSwitcher(active: WorkspacePane, hasChanges: Boolean, onSetPane: (WorkspacePane) -> Unit) {
-    Row(
-        modifier = Modifier.clip(RoundedCornerShape(6.dp)).background(MaterialTheme.colorScheme.surfaceVariant).padding(2.dp),
-    ) {
-        PaneButton("Chat", active == WorkspacePane.CHAT) { onSetPane(WorkspacePane.CHAT) }
-        PaneButton(if (hasChanges) "Changes •" else "Changes", active == WorkspacePane.CHANGES) { onSetPane(WorkspacePane.CHANGES) }
+internal data class TimelinePresentationItem(
+    val item: TimelineItem,
+    val sourceItemIds: List<String>,
+)
+
+private data class HistoryScrollAnchor(val itemId: String, val itemOffset: Int)
+
+internal fun groupConsecutiveCommands(timeline: List<TimelineItem>): List<TimelinePresentationItem> = buildList {
+    var index = 0
+    while (index < timeline.size) {
+        val item = timeline[index]
+        if (item.kind != TimelineKind.COMMAND) {
+            add(TimelinePresentationItem(item, listOf(item.id)))
+            index++
+            continue
+        }
+        var end = index + 1
+        while (end < timeline.size && timeline[end].kind == TimelineKind.COMMAND) end++
+        val commands = timeline.subList(index, end)
+        if (commands.size == 1) {
+            add(TimelinePresentationItem(item, listOf(item.id)))
+        } else {
+            val status = when {
+                commands.any { it.status.isTimelineItemRunning() } -> "inProgress"
+                commands.any { it.status.equals("failed", ignoreCase = true) } -> "failed"
+                else -> "completed"
+            }
+            val body = commands.mapIndexed { commandIndex, command ->
+                buildString {
+                    append(commandIndex + 1)
+                    append(". ")
+                    append(command.title.ifBlank { "Command" })
+                    if (command.body.isNotBlank()) {
+                        append('\n')
+                        append(command.body.trimEnd())
+                    }
+                }
+            }.joinToString("\n\n")
+            add(
+                TimelinePresentationItem(
+                    item = TimelineItem(
+                        id = "command-group:${commands.first().id}",
+                        kind = TimelineKind.COMMAND,
+                        title = "运行了多个命令",
+                        body = body,
+                        status = status,
+                    ),
+                    sourceItemIds = commands.map(TimelineItem::id),
+                ),
+            )
+        }
+        index = end
     }
 }
-
-@Composable
-private fun PaneButton(label: String, selected: Boolean, onClick: () -> Unit) {
-    Text(
-        label,
-        modifier = Modifier.clip(RoundedCornerShape(4.dp))
-            .background(if (selected) MaterialTheme.colorScheme.surface else Color.Transparent)
-            .clickable(onClick = onClick)
-            .padding(horizontal = 10.dp, vertical = 6.dp),
-        style = MaterialTheme.typography.labelMedium,
-    )
-}
-
-private data class HistoryScrollAnchor(val itemId: String, val scrollOffset: Int)
 
 @Composable
 private fun Conversation(
@@ -1107,10 +1149,27 @@ private fun Conversation(
 ) {
     val conversationKey = state.selectedThreadId ?: "project:${state.selectedProjectPath.orEmpty()}"
     val scrollScope = rememberCoroutineScope()
+    val presentationTimeline = remember(state.timeline) { groupConsecutiveCommands(state.timeline) }
     var pendingHistoryAnchor by remember(conversationKey) { mutableStateOf<HistoryScrollAnchor?>(null) }
+    var programmaticScroll by remember(conversationKey) { mutableStateOf(false) }
     val historyHeaderVisible = state.hasOlderHistory ||
         state.isOlderHistoryLoading ||
         state.olderHistoryError != null
+
+    fun visibleHistoryAnchor(): HistoryScrollAnchor? {
+        val firstTimelineItem = listState.layoutInfo.visibleItemsInfo.firstOrNull { item ->
+            item.key != HISTORY_CONTROL_KEY &&
+                item.key != WORKING_ITEM_KEY &&
+                item.key != BOTTOM_SENTINEL_KEY
+        } ?: return null
+        val itemId = firstTimelineItem.key as? String ?: return null
+        val sourceItemId = presentationTimeline
+            .firstOrNull { it.item.id == itemId }
+            ?.sourceItemIds
+            ?.lastOrNull()
+            ?: itemId
+        return HistoryScrollAnchor(sourceItemId, firstTimelineItem.offset)
+    }
 
     if (state.timeline.isEmpty()) {
         val project = state.projects.firstOrNull { it.path == state.selectedProjectPath }
@@ -1155,40 +1214,61 @@ private fun Conversation(
 
     val requestOlderHistory = {
         if (state.hasOlderHistory && !state.isOlderHistoryLoading && pendingHistoryAnchor == null) {
-            val firstTimelineItem = listState.layoutInfo.visibleItemsInfo.firstOrNull { item ->
-                item.key != HISTORY_CONTROL_KEY && item.key != WORKING_ITEM_KEY
-            }
-            val itemId = firstTimelineItem?.key as? String
-            if (itemId != null) {
-                pendingHistoryAnchor = HistoryScrollAnchor(
-                    itemId = itemId,
-                    scrollOffset = -firstTimelineItem.offset,
-                )
-            }
+            pendingHistoryAnchor = visibleHistoryAnchor()
             onLoadOlderHistory()
         }
     }
 
     LaunchedEffect(
         conversationKey,
-        state.timeline.firstOrNull()?.id,
-        state.timeline.lastOrNull()?.id,
+        presentationTimeline.firstOrNull()?.item?.id,
+        presentationTimeline.lastOrNull()?.item?.id,
         hasPositionedConversation,
     ) {
-        if (hasPositionedConversation || state.timeline.isEmpty()) return@LaunchedEffect
+        if (hasPositionedConversation || presentationTimeline.isEmpty()) return@LaunchedEffect
         val leadingItems = if (historyHeaderVisible) 1 else 0
-        val workingItems = if (state.isTurnRunning && state.timeline.lastOrNull()?.kind != TimelineKind.AGENT) 1 else 0
-        listState.scrollToItem(leadingItems + state.timeline.lastIndex + workingItems)
-        onFollowLatestChange(true)
-        onConversationPositioned()
+        val workingItems = if (state.isTurnRunning && presentationTimeline.lastOrNull()?.item?.kind != TimelineKind.AGENT) 1 else 0
+        programmaticScroll = true
+        try {
+            listState.scrollToAbsoluteBottom(leadingItems + presentationTimeline.size + workingItems)
+            onFollowLatestChange(true)
+            onConversationPositioned()
+        } finally {
+            programmaticScroll = false
+        }
     }
     LaunchedEffect(listState, conversationKey, hasPositionedConversation) {
         if (!hasPositionedConversation) return@LaunchedEffect
         snapshotFlow {
-            val layout = listState.layoutInfo
-            val lastVisibleIndex = layout.visibleItemsInfo.lastOrNull()?.index ?: -1
-            layout.totalItemsCount == 0 || lastVisibleIndex >= layout.totalItemsCount - 2
-        }.distinctUntilChanged().collect(onFollowLatestChange)
+            listState.isScrollInProgress to listState.canScrollForward
+        }.distinctUntilChanged().collect { (isScrolling, canScrollForward) ->
+            if (!programmaticScroll && isScrolling) onFollowLatestChange(!canScrollForward)
+        }
+    }
+    LaunchedEffect(listState, conversationKey, hasPositionedConversation, followLatest) {
+        if (!hasPositionedConversation || !followLatest) return@LaunchedEffect
+        snapshotFlow {
+            Triple(
+                listState.canScrollForward,
+                listState.isScrollInProgress,
+                listState.layoutInfo.totalItemsCount,
+            )
+        }.distinctUntilChanged().collect { (canScrollForward, isScrolling, totalItemsCount) ->
+            if (!canScrollForward || isScrolling || programmaticScroll || totalItemsCount == 0) {
+                return@collect
+            }
+            // Markwon's AndroidView can grow after the LazyColumn's first positioning pass.
+            withFrameNanos { }
+            if (!listState.canScrollForward || listState.isScrollInProgress || programmaticScroll) {
+                return@collect
+            }
+            programmaticScroll = true
+            try {
+                listState.scrollToAbsoluteBottom(totalItemsCount - 1)
+            } finally {
+                programmaticScroll = false
+            }
+        }
     }
     LaunchedEffect(
         listState,
@@ -1207,43 +1287,73 @@ private fun Conversation(
             }
     }
     LaunchedEffect(
+        listState,
+        state.selectedThreadId,
+        state.isOlderHistoryLoading,
+        pendingHistoryAnchor != null,
+        presentationTimeline.firstOrNull()?.item?.id,
+    ) {
+        if (!state.isOlderHistoryLoading || pendingHistoryAnchor == null) return@LaunchedEffect
+        snapshotFlow {
+            listState.layoutInfo.visibleItemsInfo.firstOrNull { item ->
+                item.key != HISTORY_CONTROL_KEY &&
+                    item.key != WORKING_ITEM_KEY &&
+                    item.key != BOTTOM_SENTINEL_KEY
+            }?.let { item -> item.key to item.offset }
+        }.distinctUntilChanged().collect {
+            visibleHistoryAnchor()?.let { anchor -> pendingHistoryAnchor = anchor }
+        }
+    }
+    LaunchedEffect(
         state.selectedThreadId,
         state.isOlderHistoryLoading,
         state.olderHistoryError,
-        state.timeline.firstOrNull()?.id,
+        presentationTimeline.firstOrNull()?.item?.id,
     ) {
         val anchor = pendingHistoryAnchor ?: return@LaunchedEffect
         if (state.isOlderHistoryLoading) return@LaunchedEffect
-        val timelineIndex = state.timeline.indexOfFirst { it.id == anchor.itemId }
+        val timelineIndex = presentationTimeline.indexOfFirst { anchor.itemId in it.sourceItemIds }
         if (timelineIndex >= 0) {
             val leadingItems = if (historyHeaderVisible) 1 else 0
-            listState.scrollToItem(timelineIndex + leadingItems, anchor.scrollOffset)
+            programmaticScroll = true
+            try {
+                listState.scrollToItem(timelineIndex + leadingItems)
+                withFrameNanos { }
+                listState.scrollBy(-anchor.itemOffset.toFloat())
+            } finally {
+                programmaticScroll = false
+            }
         }
         pendingHistoryAnchor = null
     }
     LaunchedEffect(
         state.selectedThreadId,
-        state.timeline.size,
-        state.timeline.lastOrNull()?.body?.length,
+        presentationTimeline.size,
+        presentationTimeline.lastOrNull()?.item?.body?.length,
         state.isTurnRunning,
         historyHeaderVisible,
         pendingHistoryAnchor,
         followLatest,
         hasPositionedConversation,
     ) {
-        if (!hasPositionedConversation || state.timeline.isEmpty() || !followLatest ||
+        if (!hasPositionedConversation || presentationTimeline.isEmpty() || !followLatest ||
             state.isOlderHistoryLoading || pendingHistoryAnchor != null
         ) {
             return@LaunchedEffect
         }
         val leadingItems = if (historyHeaderVisible) 1 else 0
-        val workingItems = if (state.isTurnRunning && state.timeline.lastOrNull()?.kind != TimelineKind.AGENT) 1 else 0
-        listState.scrollToItem(leadingItems + state.timeline.lastIndex + workingItems)
+        val workingItems = if (state.isTurnRunning && presentationTimeline.lastOrNull()?.item?.kind != TimelineKind.AGENT) 1 else 0
+        programmaticScroll = true
+        try {
+            listState.scrollToAbsoluteBottom(leadingItems + presentationTimeline.size + workingItems)
+        } finally {
+            programmaticScroll = false
+        }
     }
 
     Box(modifier) {
         LazyColumn(
-            modifier = Modifier.fillMaxSize(),
+            modifier = Modifier.fillMaxSize().testTag("conversation-list"),
             state = listState,
             contentPadding = PaddingValues(horizontal = 16.dp, vertical = 22.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp),
@@ -1251,7 +1361,7 @@ private fun Conversation(
         if (historyHeaderVisible) {
             item(key = HISTORY_CONTROL_KEY) {
                 Box(
-                    modifier = Modifier.fillMaxWidth().height(48.dp),
+                    modifier = Modifier.fillMaxWidth().height(48.dp).testTag("history-control"),
                     contentAlignment = Alignment.Center,
                 ) {
                     when {
@@ -1278,12 +1388,15 @@ private fun Conversation(
                 }
             }
         }
-            items(state.timeline, key = { it.id }) { item ->
-                Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.TopCenter) {
-                    TimelineRow(item, Modifier.fillMaxWidth().widthIn(max = 820.dp))
+            items(presentationTimeline, key = { it.item.id }) { presentation ->
+                Box(
+                    Modifier.fillMaxWidth().testTag("timeline-item-${presentation.item.id}"),
+                    contentAlignment = Alignment.TopCenter,
+                ) {
+                    TimelineRow(presentation.item, Modifier.fillMaxWidth().widthIn(max = 820.dp))
                 }
             }
-            if (state.isTurnRunning && state.timeline.lastOrNull()?.kind != TimelineKind.AGENT) {
+            if (state.isTurnRunning && presentationTimeline.lastOrNull()?.item?.kind != TimelineKind.AGENT) {
                 item(key = WORKING_ITEM_KEY) {
                     Row(
                         modifier = Modifier.fillMaxWidth().widthIn(max = 820.dp).padding(vertical = 4.dp),
@@ -1295,17 +1408,28 @@ private fun Conversation(
                     }
                 }
             }
+            item(key = BOTTOM_SENTINEL_KEY) {
+                Spacer(Modifier.fillMaxWidth().height(1.dp).testTag("conversation-bottom"))
+            }
         }
         if (!followLatest) {
             SmallFloatingActionButton(
                 onClick = {
                     scrollScope.launch {
                         val lastIndex = listState.layoutInfo.totalItemsCount - 1
-                        if (lastIndex >= 0) listState.animateScrollToItem(lastIndex)
-                        onFollowLatestChange(true)
+                        if (lastIndex >= 0) {
+                            programmaticScroll = true
+                            try {
+                                listState.scrollToAbsoluteBottom(lastIndex, animate = true)
+                                onFollowLatestChange(true)
+                            } finally {
+                                programmaticScroll = false
+                            }
+                        }
                     }
                 },
-                modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 12.dp),
+                modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 12.dp)
+                    .testTag("conversation-bottom-button"),
                 shape = CircleShape,
                 containerColor = MaterialTheme.colorScheme.surface,
                 contentColor = MaterialTheme.colorScheme.onSurface,
@@ -1318,7 +1442,30 @@ private fun Conversation(
 
 private const val HISTORY_CONTROL_KEY = "history-control"
 private const val WORKING_ITEM_KEY = "working"
+private const val BOTTOM_SENTINEL_KEY = "bottom-sentinel"
 private const val HISTORY_PREFETCH_INDEX = 2
+
+private suspend fun LazyListState.scrollToAbsoluteBottom(lastIndex: Int, animate: Boolean = false) {
+    if (lastIndex < 0) return
+    if (animate) animateScrollToItem(lastIndex) else scrollToItem(lastIndex)
+    var attempts = 0
+    var settledFrames = 0
+    while (attempts++ < MAX_BOTTOM_SCROLL_STEPS) {
+        withFrameNanos { }
+        if (!canScrollForward) {
+            settledFrames++
+            if (settledFrames >= BOTTOM_LAYOUT_SETTLE_FRAMES) return
+            continue
+        }
+        settledFrames = 0
+        val layout = layoutInfo
+        val viewportHeight = (layout.viewportEndOffset - layout.viewportStartOffset).coerceAtLeast(1)
+        scrollBy(viewportHeight.toFloat())
+    }
+}
+
+private const val MAX_BOTTOM_SCROLL_STEPS = 1_000
+private const val BOTTOM_LAYOUT_SETTLE_FRAMES = 8
 
 @Composable
 private fun TimelineRow(item: TimelineItem, modifier: Modifier) {
@@ -1333,7 +1480,7 @@ private fun TimelineRow(item: TimelineItem, modifier: Modifier) {
             }
         }
         TimelineKind.AGENT -> Column(modifier) {
-            MarkdownBody(item.body)
+            MarkdownBody(item.body, Modifier.testTag("timeline-agent-${item.id}"))
         }
         TimelineKind.REASONING -> ExpandableTool(
             modifier,
@@ -1351,22 +1498,20 @@ private fun TimelineRow(item: TimelineItem, modifier: Modifier) {
             item.body,
             item.status,
             expansionKey = item.id,
+            autoCollapseOnComplete = true,
         )
         TimelineKind.COMMAND -> ExpandableTool(
             modifier, Icons.Outlined.Terminal, item.title.ifBlank { "Command" }, item.body, item.status,
-            expansionKey = item.id, mono = true,
+            expansionKey = item.id, mono = true, autoCollapseOnComplete = true,
         )
-        TimelineKind.FILE_CHANGE -> ExpandableTool(
-            modifier, Icons.Outlined.Code, item.title.ifBlank { "File changes" }, item.body, item.status,
-            expansionKey = item.id, mono = true,
-        )
+        TimelineKind.FILE_CHANGE -> FileChangesTool(item, modifier)
         TimelineKind.TOOL -> ExpandableTool(
             modifier, Icons.Outlined.Build, item.title.ifBlank { "Tool" }, item.body, item.status,
-            expansionKey = item.id, mono = true,
+            expansionKey = item.id, mono = true, autoCollapseOnComplete = true,
         )
         TimelineKind.REVIEW -> ExpandableTool(
             modifier, Icons.Outlined.Code, item.title.ifBlank { "Code review" }, item.body, item.status,
-            expansionKey = item.id,
+            expansionKey = item.id, autoCollapseOnComplete = true,
         )
         TimelineKind.COMPACTION -> Row(
             modifier = modifier.padding(vertical = 6.dp),
@@ -1394,6 +1539,155 @@ private fun TimelineRow(item: TimelineItem, modifier: Modifier) {
 }
 
 @Composable
+private fun FileChangesTool(item: TimelineItem, modifier: Modifier) {
+    var expanded by remember(item.id) { mutableStateOf(item.status.isTimelineItemRunning()) }
+    LaunchedEffect(item.id, item.status) {
+        expanded = item.status.isTimelineItemRunning()
+    }
+    val counts = item.fileChanges.fold(0 to 0) { total, change ->
+        val changeCounts = diffLineCounts(change.diff)
+        total.first + changeCounts.first to total.second + changeCounts.second
+    }
+    val title = when (item.fileChanges.size) {
+        0 -> item.title.ifBlank { "File changes" }
+        1 -> item.fileChanges.first().path
+        else -> "已编辑 ${item.fileChanges.size} 个文件"
+    }
+    Surface(
+        modifier = modifier.animateContentSize().testTag("file-changes-${item.id}"),
+        shape = RoundedCornerShape(6.dp),
+        color = MaterialTheme.colorScheme.surfaceVariant,
+    ) {
+        Column {
+            Row(
+                modifier = Modifier.fillMaxWidth().clickable { expanded = !expanded }
+                    .padding(horizontal = 12.dp, vertical = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(Icons.Outlined.Code, contentDescription = null, modifier = Modifier.size(17.dp))
+                Spacer(Modifier.width(9.dp))
+                Text(
+                    title,
+                    modifier = Modifier.weight(1f),
+                    style = MaterialTheme.typography.labelLarge,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                if (counts.first > 0) {
+                    Text("+${counts.first}", style = MaterialTheme.typography.labelMedium, color = CodexGreen)
+                    Spacer(Modifier.width(6.dp))
+                }
+                if (counts.second > 0) {
+                    Text("-${counts.second}", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.error)
+                    Spacer(Modifier.width(7.dp))
+                }
+                Icon(
+                    if (expanded) Icons.Outlined.ExpandMore else Icons.Outlined.ChevronRight,
+                    contentDescription = if (expanded) "收起文件修改" else "展开文件修改",
+                    modifier = Modifier.size(18.dp),
+                )
+            }
+            if (expanded) {
+                HorizontalDivider()
+                if (item.fileChanges.isEmpty()) {
+                    Text(
+                        item.body.ifBlank { "No file details" },
+                        modifier = Modifier.fillMaxWidth().padding(12.dp),
+                        style = MonoText,
+                    )
+                } else {
+                    item.fileChanges.forEachIndexed { index, change ->
+                        FileChangeBlock(change)
+                        if (index != item.fileChanges.lastIndex) HorizontalDivider()
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun FileChangeBlock(change: FileChangeSummary) {
+    val counts = diffLineCounts(change.diff)
+    Column(Modifier.fillMaxWidth()) {
+        Row(
+            modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 9.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(Icons.Outlined.Description, contentDescription = null, modifier = Modifier.size(16.dp))
+            Spacer(Modifier.width(8.dp))
+            Text(
+                change.path,
+                modifier = Modifier.weight(1f),
+                style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace),
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Surface(
+                shape = RoundedCornerShape(4.dp),
+                color = MaterialTheme.colorScheme.surface,
+            ) {
+                Text(
+                    change.kind.displayFileChangeKind(),
+                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            if (counts.first > 0 || counts.second > 0) {
+                Spacer(Modifier.width(8.dp))
+                Text(
+                    "+${counts.first}  -${counts.second}",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+        if (change.diff.isNotBlank()) {
+            Column(
+                modifier = Modifier.fillMaxWidth().horizontalScroll(rememberScrollState())
+                    .background(MaterialTheme.colorScheme.surface),
+            ) {
+                change.diff.lineSequence().forEach { line ->
+                    val background = when {
+                        line.startsWith("+") && !line.startsWith("+++") -> DiffGreen.copy(alpha = 0.55f)
+                        line.startsWith("-") && !line.startsWith("---") -> DiffRed.copy(alpha = 0.55f)
+                        else -> Color.Transparent
+                    }
+                    Text(
+                        line.ifEmpty { " " },
+                        modifier = Modifier.widthIn(min = 680.dp).background(background)
+                            .padding(horizontal = 12.dp, vertical = 1.dp),
+                        style = MonoText,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        softWrap = false,
+                    )
+                }
+            }
+        }
+    }
+}
+
+internal fun diffLineCounts(diff: String): Pair<Int, Int> {
+    var additions = 0
+    var deletions = 0
+    diff.lineSequence().forEach { line ->
+        when {
+            line.startsWith("+") && !line.startsWith("+++") -> additions++
+            line.startsWith("-") && !line.startsWith("---") -> deletions++
+        }
+    }
+    return additions to deletions
+}
+
+private fun String.displayFileChangeKind(): String = when (lowercase()) {
+    "add", "added", "create", "created" -> "Added"
+    "delete", "deleted", "remove", "removed" -> "Deleted"
+    "rename", "renamed", "move", "moved" -> "Renamed"
+    else -> "Modified"
+}
+
+@Composable
 private fun ExpandableTool(
     modifier: Modifier,
     icon: ImageVector,
@@ -1411,7 +1705,7 @@ private fun ExpandableTool(
         if (autoCollapseOnComplete) expanded = status.isTimelineItemRunning()
     }
     Surface(
-        modifier = modifier.animateContentSize(),
+        modifier = modifier.animateContentSize().testTag("timeline-tool-$expansionKey"),
         shape = RoundedCornerShape(6.dp),
         color = MaterialTheme.colorScheme.surfaceVariant,
     ) {
@@ -1425,14 +1719,19 @@ private fun ExpandableTool(
                 Text(title, modifier = Modifier.weight(1f), style = MaterialTheme.typography.labelLarge, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 if (status.isNotBlank()) Text(status, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 Spacer(Modifier.width(6.dp))
-                Icon(Icons.Outlined.ChevronRight, contentDescription = if (expanded) "收起" else "展开", modifier = Modifier.size(18.dp))
+                Icon(
+                    if (expanded) Icons.Outlined.ExpandMore else Icons.Outlined.ChevronRight,
+                    contentDescription = if (expanded) "收起" else "展开",
+                    modifier = Modifier.size(18.dp),
+                )
             }
             if (expanded && body.isNotBlank()) {
                 HorizontalDivider()
                 SelectionContainer {
                     Text(
                         body,
-                        modifier = Modifier.fillMaxWidth().padding(12.dp),
+                        modifier = Modifier.fillMaxWidth().padding(12.dp)
+                            .testTag("timeline-tool-body-$expansionKey"),
                         style = if (mono) MonoText else MaterialTheme.typography.bodyMedium,
                     )
                 }
@@ -1448,29 +1747,115 @@ internal fun String.isTimelineItemRunning(): Boolean =
         equals("started", ignoreCase = true)
 
 @Composable
-private fun MarkdownBody(text: String) {
-    val blocks = text.split("```")
-    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        blocks.forEachIndexed { index, block ->
-            if (block.isEmpty()) return@forEachIndexed
-            if (index % 2 == 1) {
-                val content = block.substringAfter('\n', block).trimEnd()
-                Surface(
-                    shape = RoundedCornerShape(5.dp),
-                    color = MaterialTheme.colorScheme.surfaceVariant,
-                    modifier = Modifier.fillMaxWidth(),
-                ) {
-                    SelectionContainer {
-                        Text(content, Modifier.horizontalScroll(rememberScrollState()).padding(12.dp), style = MonoText)
-                    }
+private fun MarkdownBody(text: String, modifier: Modifier = Modifier) {
+    val context = LocalContext.current
+    val density = LocalDensity.current
+    val latexTextSize = with(density) { MaterialTheme.typography.bodyLarge.fontSize.toPx() }
+    val markwon = remember(context, latexTextSize) {
+        Markwon.builder(context)
+            .usePlugin(MarkwonInlineParserPlugin.create())
+            .usePlugin(JLatexMathPlugin.create(latexTextSize) { builder -> builder.inlinesEnabled(true) })
+            .usePlugin(StrikethroughPlugin.create())
+            .usePlugin(TablePlugin.create(context))
+            .build()
+    }
+    val textColor = MaterialTheme.colorScheme.onSurface.toArgb()
+    val rendered = remember(text) { normalizeLatexMarkdown(text) }
+    AndroidView(
+        factory = { viewContext ->
+            TextView(viewContext).apply {
+                setTextIsSelectable(true)
+                movementMethod = LinkMovementMethod.getInstance()
+                includeFontPadding = false
+                setLineSpacing(0f, 1.12f)
+            }
+        },
+        update = { textView ->
+            textView.setTextColor(textColor)
+            markwon.setMarkdown(textView, rendered)
+        },
+        modifier = modifier.fillMaxWidth(),
+    )
+}
+
+internal fun normalizeLatexMarkdown(markdown: String): String {
+    if ('$' !in markdown) return markdown
+    val output = StringBuilder(markdown.length + 16)
+    var index = 0
+    var fenceCharacter: Char? = null
+    var fenceLength = 0
+    var inlineBackticks = 0
+    while (index < markdown.length) {
+        val character = markdown[index]
+        if (character == '`' || character == '~') {
+            var runEnd = index + 1
+            while (runEnd < markdown.length && markdown[runEnd] == character) runEnd++
+            val runLength = runEnd - index
+            if (fenceCharacter != null) {
+                if (character == fenceCharacter && runLength >= fenceLength) {
+                    fenceCharacter = null
+                    fenceLength = 0
                 }
-            } else {
-                SelectionContainer {
-                    Text(block.trim(), style = MaterialTheme.typography.bodyLarge)
+            } else if (inlineBackticks == 0 && runLength >= 3) {
+                fenceCharacter = character
+                fenceLength = runLength
+            } else if (character == '`') {
+                inlineBackticks = when {
+                    inlineBackticks == 0 -> runLength
+                    inlineBackticks == runLength -> 0
+                    else -> inlineBackticks
                 }
             }
+            output.append(markdown, index, runEnd)
+            index = runEnd
+            continue
+        }
+        if (fenceCharacter != null || inlineBackticks > 0 || character != '$' || markdown.isEscapedAt(index)) {
+            output.append(character)
+            index++
+            continue
+        }
+        if (markdown.startsWith("$$", index)) {
+            output.append("$$")
+            index += 2
+            continue
+        }
+        if (markdown.getOrNull(index + 1)?.isWhitespace() != false) {
+            output.append(character)
+            index++
+            continue
+        }
+        var closing = index + 1
+        while (closing < markdown.length && markdown[closing] != '\n') {
+            if (markdown[closing] == '$' && !markdown.isEscapedAt(closing) &&
+                markdown.getOrNull(closing - 1)?.isWhitespace() == false &&
+                markdown.getOrNull(closing + 1) != '$'
+            ) {
+                break
+            }
+            closing++
+        }
+        if (closing < markdown.length && markdown[closing] == '$') {
+            output.append("$$")
+            output.append(markdown, index + 1, closing)
+            output.append("$$")
+            index = closing + 1
+        } else {
+            output.append(character)
+            index++
         }
     }
+    return output.toString()
+}
+
+private fun String.isEscapedAt(index: Int): Boolean {
+    var slashes = 0
+    var cursor = index - 1
+    while (cursor >= 0 && this[cursor] == '\\') {
+        slashes++
+        cursor--
+    }
+    return slashes % 2 == 1
 }
 
 @Composable
@@ -1496,7 +1881,7 @@ private fun Composer(
     onSetServiceTier: (String?) -> Unit,
     onSetCollaborationMode: (String) -> Unit,
     onSetPermissionProfile: (String?) -> Unit,
-    onSetApprovalPolicy: (String) -> Unit,
+    onSetPermissionMode: (PermissionMode) -> Unit,
     onLoadRemoteDirectory: (String) -> Unit,
     onClearRemoteDirectory: () -> Unit,
     modifier: Modifier = Modifier,
@@ -1510,7 +1895,6 @@ private fun Composer(
     var modelSettingsPage by remember(state.selectedThreadId) { mutableStateOf(ModelSettingsPage.ROOT) }
     var addMenuOpen by remember(state.selectedThreadId) { mutableStateOf(false) }
     var showRemotePathPicker by remember(state.selectedThreadId) { mutableStateOf(false) }
-    var collaborationModeMenu by remember { mutableStateOf(false) }
     var policyMenu by remember { mutableStateOf(false) }
     val context = LocalContext.current
     val composerScope = rememberCoroutineScope()
@@ -1532,7 +1916,6 @@ private fun Composer(
     val composerMenuProperties = remember { PopupProperties(focusable = false) }
     val selectedModel = state.models.firstOrNull { it.id == state.selectedModel }
     val selectedServiceTier = selectedModel?.serviceTiers?.firstOrNull { it.id == state.selectedServiceTier }
-    val selectedMode = state.collaborationModes.firstOrNull { it.mode == state.selectedCollaborationMode }
     val supportsImages = selectedModel?.inputModalities?.any { it.equals("image", true) } == true
     val selectedThread = state.threads.firstOrNull { it.id == state.selectedThreadId }
     val cwd = selectedThread?.cwd?.takeIf(String::isNotBlank) ?: state.selectedProjectPath.orEmpty()
@@ -1806,7 +2189,7 @@ private fun Composer(
                                 mentionKindFilter = null
                             }
                         },
-                        modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp),
+                        modifier = Modifier.fillMaxWidth().heightIn(min = 48.dp).testTag("composer-input"),
                         textStyle = MaterialTheme.typography.bodyLarge.copy(color = MaterialTheme.colorScheme.onSurface),
                         cursorBrush = SolidColor(MaterialTheme.colorScheme.onSurface),
                         minLines = 1,
@@ -1834,6 +2217,7 @@ private fun Composer(
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
                             ComposerAddMenu(
+                                modifier = Modifier.testTag("composer-add"),
                                 expanded = addMenuOpen,
                                 properties = composerMenuProperties,
                                 skills = addMenuSkills.map { skill ->
@@ -1885,119 +2269,28 @@ private fun Composer(
                             )
                             Box {
                                 CompactComposerMenuButton(
-                                    label = modelSettingsSummary(
-                                        modelName = selectedModel?.displayName,
-                                        effort = state.selectedReasoningEffort,
-                                        serviceTier = selectedServiceTier?.name,
-                                    ),
-                                    maxLabelWidth = 190.dp,
-                                    enabled = state.models.isNotEmpty(),
-                                    onClick = {
-                                        modelSettingsPage = ModelSettingsPage.ROOT
-                                        modelSettingsMenu = true
-                                    },
+                                    modifier = Modifier.testTag("composer-permissions"),
+                                    label = permissionModeLabel(state),
+                                    maxLabelWidth = 88.dp,
+                                    leadingIcon = Icons.Outlined.Tune,
+                                    showChevron = false,
+                                    onClick = { policyMenu = true },
                                 )
-                                ModelSettingsDropdown(
+                                PermissionDropdown(
                                     state = state,
-                                    expanded = modelSettingsMenu,
-                                    page = modelSettingsPage,
+                                    expanded = policyMenu,
                                     properties = composerMenuProperties,
-                                    onDismiss = {
-                                        modelSettingsMenu = false
-                                        modelSettingsPage = ModelSettingsPage.ROOT
+                                    onDismiss = { policyMenu = false },
+                                    onSetPermissionMode = {
+                                        onSetPermissionMode(it)
+                                        policyMenu = false
                                     },
-                                    onPageChange = { modelSettingsPage = it },
-                                    onSetModel = onSetModel,
-                                    onSetReasoningEffort = onSetReasoningEffort,
-                                    onSetServiceTier = onSetServiceTier,
+                                    onSetPermissionProfile = {
+                                        onSetPermissionProfile(it)
+                                        policyMenu = false
+                                    },
                                 )
                             }
-                        if (state.collaborationModes.isNotEmpty()) {
-                            Box {
-                                CompactComposerMenuButton(
-                                    label = selectedMode?.name ?: "Code",
-                                    maxLabelWidth = 68.dp,
-                                    leadingIcon = if (state.selectedCollaborationMode == "plan") Icons.Outlined.Flag else null,
-                                    onClick = { collaborationModeMenu = true },
-                                )
-                                DropdownMenu(
-                                    expanded = collaborationModeMenu,
-                                    onDismissRequest = { collaborationModeMenu = false },
-                                    properties = composerMenuProperties,
-                                ) {
-                                    state.collaborationModes.forEach { mode ->
-                                        DropdownMenuItem(
-                                            text = { Text(mode.name) },
-                                            onClick = {
-                                                onSetCollaborationMode(mode.mode)
-                                                collaborationModeMenu = false
-                                            },
-                                            trailingIcon = {
-                                                if (mode.mode == state.selectedCollaborationMode) {
-                                                    Icon(Icons.Outlined.Check, contentDescription = null)
-                                                }
-                                            },
-                                        )
-                                    }
-                                }
-                            }
-                        }
-                        Box {
-                            CompactComposerMenuButton(
-                                label = state.selectedPermissionProfile
-                                    ?: if (state.approvalPolicy == "never") "Full" else "Ask",
-                                maxLabelWidth = 76.dp,
-                                leadingIcon = Icons.Outlined.Tune,
-                                showChevron = false,
-                                onClick = { policyMenu = true },
-                            )
-                            DropdownMenu(
-                                expanded = policyMenu,
-                                onDismissRequest = { policyMenu = false },
-                                properties = composerMenuProperties,
-                            ) {
-                                if (state.permissionProfiles.isNotEmpty()) {
-                                    DropdownMenuItem(
-                                        text = { Text("Project default") },
-                                        onClick = { onSetPermissionProfile(null); policyMenu = false },
-                                        trailingIcon = {
-                                            if (state.selectedPermissionProfile == null) Icon(Icons.Outlined.Check, contentDescription = null)
-                                        },
-                                    )
-                                    state.permissionProfiles.forEach { profile ->
-                                        DropdownMenuItem(
-                                            text = {
-                                                Column {
-                                                    Text(profile.id, style = MaterialTheme.typography.labelLarge)
-                                                    if (profile.description.isNotBlank()) {
-                                                        Text(profile.description, style = MaterialTheme.typography.bodySmall, maxLines = 2)
-                                                    }
-                                                }
-                                            },
-                                            enabled = profile.allowed,
-                                            onClick = {
-                                                onSetPermissionProfile(profile.id)
-                                                policyMenu = false
-                                            },
-                                            trailingIcon = {
-                                                if (profile.id == state.selectedPermissionProfile) {
-                                                    Icon(Icons.Outlined.Check, contentDescription = null)
-                                                }
-                                            },
-                                        )
-                                    }
-                                } else {
-                                    DropdownMenuItem(
-                                        text = { Text("Ask for approval") },
-                                        onClick = { onSetApprovalPolicy("on-request"); policyMenu = false },
-                                    )
-                                    DropdownMenuItem(
-                                        text = { Text("Full access") },
-                                        onClick = { onSetApprovalPolicy("never"); policyMenu = false },
-                                    )
-                                }
-                            }
-                        }
                         }
                         if (isKeyboardVisible) {
                             IconButton(
@@ -2022,6 +2315,43 @@ private fun Composer(
                             }
                             Spacer(Modifier.width(4.dp))
                         }
+                        ContextUsageRing(
+                            usage = state.threadTokenUsage,
+                            onClick = onShowStatus,
+                            modifier = Modifier.testTag("composer-context"),
+                        )
+                        Spacer(Modifier.width(2.dp))
+                        Box {
+                            CompactComposerMenuButton(
+                                modifier = Modifier.testTag("composer-model"),
+                                label = modelSettingsSummary(
+                                    modelId = selectedModel?.id,
+                                    effort = state.selectedReasoningEffort,
+                                    serviceTier = selectedServiceTier?.name,
+                                ),
+                                maxLabelWidth = 144.dp,
+                                enabled = state.models.isNotEmpty(),
+                                onClick = {
+                                    modelSettingsPage = ModelSettingsPage.ROOT
+                                    modelSettingsMenu = true
+                                },
+                            )
+                            ModelSettingsDropdown(
+                                state = state,
+                                expanded = modelSettingsMenu,
+                                page = modelSettingsPage,
+                                properties = composerMenuProperties,
+                                onDismiss = {
+                                    modelSettingsMenu = false
+                                    modelSettingsPage = ModelSettingsPage.ROOT
+                                },
+                                onPageChange = { modelSettingsPage = it },
+                                onSetModel = onSetModel,
+                                onSetReasoningEffort = onSetReasoningEffort,
+                                onSetServiceTier = onSetServiceTier,
+                            )
+                        }
+                        Spacer(Modifier.width(3.dp))
                         Surface(
                             modifier = Modifier.size(34.dp),
                             shape = CircleShape,
@@ -2049,6 +2379,7 @@ private fun Composer(
                                 },
                                 enabled = (text.text.isNotBlank() || attachments.isNotEmpty()) &&
                                     (!state.isTurnRunning || state.activeTurnId != null),
+                                modifier = Modifier.testTag("composer-send"),
                             ) {
                                 Icon(
                                     Icons.AutoMirrored.Outlined.Send,
@@ -2082,6 +2413,7 @@ private fun Composer(
 
 @Composable
 private fun ComposerAddMenu(
+    modifier: Modifier = Modifier,
     expanded: Boolean,
     properties: PopupProperties,
     skills: List<ComposerMentionOption>,
@@ -2098,7 +2430,7 @@ private fun ComposerAddMenu(
     onMention: (ComposerMentionOption) -> Unit,
 ) {
     Box {
-        IconButton(onClick = onOpen, modifier = Modifier.size(32.dp)) {
+        IconButton(onClick = onOpen, modifier = modifier.size(32.dp)) {
             Icon(Icons.Outlined.Add, contentDescription = "添加", modifier = Modifier.size(20.dp))
         }
         DropdownMenu(
@@ -2403,7 +2735,7 @@ private fun GoalEditorDialog(
                 OutlinedTextField(
                     value = objective,
                     onValueChange = { objective = it },
-                    modifier = Modifier.fillMaxWidth(),
+                    modifier = Modifier.fillMaxWidth().testTag("goal-editor-input"),
                     label = { Text("Goal") },
                     minLines = 2,
                     maxLines = 5,
@@ -2853,6 +3185,161 @@ private fun ThreadGoalStatus.displayGoalStatus(): String = when (this) {
     ThreadGoalStatus.COMPLETE -> "Complete"
 }
 
+private val builtInPermissionProfiles = setOf(":workspace", ":danger-full-access", ":read-only")
+
+internal fun permissionModeFor(
+    permissionProfile: String?,
+    approvalPolicy: String,
+    approvalsReviewer: String,
+): PermissionMode? {
+    if (permissionProfile != null && permissionProfile !in builtInPermissionProfiles) return null
+    return when {
+        approvalsReviewer == "auto_review" -> PermissionMode.AUTO_REVIEW
+        permissionProfile == ":read-only" -> PermissionMode.READ_ONLY
+        permissionProfile == ":danger-full-access" || approvalPolicy == "never" -> PermissionMode.FULL_ACCESS
+        else -> PermissionMode.ASK
+    }
+}
+
+private fun permissionModeLabel(state: AppUiState): String = when (
+    permissionModeFor(state.selectedPermissionProfile, state.approvalPolicy, state.approvalsReviewer)
+) {
+    PermissionMode.ASK -> "询问"
+    PermissionMode.AUTO_REVIEW -> "替我审批"
+    PermissionMode.FULL_ACCESS -> "完全访问"
+    PermissionMode.READ_ONLY -> "只读"
+    null -> state.selectedPermissionProfile?.removePrefix(":") ?: "询问"
+}
+
+@Composable
+private fun PermissionDropdown(
+    state: AppUiState,
+    expanded: Boolean,
+    properties: PopupProperties,
+    onDismiss: () -> Unit,
+    onSetPermissionMode: (PermissionMode) -> Unit,
+    onSetPermissionProfile: (String) -> Unit,
+) {
+    val selectedMode = permissionModeFor(
+        state.selectedPermissionProfile,
+        state.approvalPolicy,
+        state.approvalsReviewer,
+    )
+    DropdownMenu(
+        expanded = expanded,
+        onDismissRequest = onDismiss,
+        modifier = Modifier.width(310.dp),
+        properties = properties,
+    ) {
+        PermissionDropdownItem(
+            title = "询问",
+            description = "需要执行命令或修改文件时询问",
+            selected = selectedMode == PermissionMode.ASK,
+            onClick = { onSetPermissionMode(PermissionMode.ASK) },
+        )
+        PermissionDropdownItem(
+            title = "替我审批",
+            description = "由 Codex 自动审查需要批准的操作",
+            selected = selectedMode == PermissionMode.AUTO_REVIEW,
+            onClick = { onSetPermissionMode(PermissionMode.AUTO_REVIEW) },
+        )
+        PermissionDropdownItem(
+            title = "完全访问",
+            description = "无需询问即可访问远端工作区和网络",
+            selected = selectedMode == PermissionMode.FULL_ACCESS,
+            onClick = { onSetPermissionMode(PermissionMode.FULL_ACCESS) },
+        )
+        PermissionDropdownItem(
+            title = "只读",
+            description = "允许读取，但不允许修改远端文件",
+            selected = selectedMode == PermissionMode.READ_ONLY,
+            onClick = { onSetPermissionMode(PermissionMode.READ_ONLY) },
+        )
+        val customProfiles = state.permissionProfiles.filter { it.id !in builtInPermissionProfiles }
+        if (customProfiles.isNotEmpty()) {
+            HorizontalDivider(Modifier.padding(vertical = 4.dp))
+            customProfiles.forEach { profile ->
+                PermissionDropdownItem(
+                    title = profile.id,
+                    description = profile.description,
+                    selected = selectedMode == null && state.selectedPermissionProfile == profile.id,
+                    enabled = profile.allowed,
+                    onClick = { onSetPermissionProfile(profile.id) },
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun PermissionDropdownItem(
+    title: String,
+    description: String,
+    selected: Boolean,
+    enabled: Boolean = true,
+    onClick: () -> Unit,
+) {
+    DropdownMenuItem(
+        text = {
+            Column {
+                Text(title, style = MaterialTheme.typography.labelLarge)
+                Text(
+                    description,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        },
+        enabled = enabled,
+        onClick = onClick,
+        trailingIcon = {
+            if (selected) Icon(Icons.Outlined.Check, contentDescription = null)
+        },
+    )
+}
+
+@Composable
+private fun ContextUsageRing(
+    usage: RemoteThreadTokenUsage?,
+    onClick: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val fraction = if (usage?.modelContextWindow != null && usage.modelContextWindow > 0) {
+        (usage.totalTokens.toFloat() / usage.modelContextWindow.toFloat()).coerceIn(0f, 1f)
+    } else {
+        0f
+    }
+    val percent = (fraction * 100).toInt()
+    val track = MaterialTheme.colorScheme.outline.copy(alpha = 0.35f)
+    val progress = when {
+        fraction >= 0.9f -> MaterialTheme.colorScheme.error
+        fraction >= 0.7f -> MaterialTheme.colorScheme.tertiary
+        else -> MaterialTheme.colorScheme.primary
+    }
+    IconButton(
+        onClick = onClick,
+        modifier = modifier.size(32.dp).semantics {
+            contentDescription = if (usage == null) "上下文用量尚不可用" else "上下文已使用 $percent%"
+        },
+    ) {
+        Canvas(Modifier.size(21.dp)) {
+            val stroke = Stroke(width = 2.2.dp.toPx(), cap = StrokeCap.Round)
+            drawCircle(track, style = stroke)
+            if (fraction > 0f) {
+                drawArc(
+                    color = progress,
+                    startAngle = -90f,
+                    sweepAngle = 360f * fraction,
+                    useCenter = false,
+                    style = stroke,
+                )
+            }
+        }
+    }
+}
+
 private enum class ModelSettingsPage { ROOT, MODEL, REASONING, SERVICE_TIER }
 
 @Composable
@@ -3065,13 +3552,13 @@ private fun ModelSettingsBackRow(title: String, onClick: () -> Unit) {
 }
 
 internal fun modelSettingsSummary(
-    modelName: String?,
+    modelId: String?,
     effort: String?,
     serviceTier: String?,
 ): String = listOfNotNull(
-    modelName ?: "模型",
+    modelId?.removePrefix("gpt-")?.removePrefix("GPT-") ?: "模型",
     effort?.displayEffort(),
-    serviceTier,
+    serviceTier?.takeUnless { it.equals("standard", ignoreCase = true) },
 ).joinToString(" · ")
 
 @Composable
@@ -3079,12 +3566,13 @@ private fun CompactComposerMenuButton(
     label: String,
     maxLabelWidth: androidx.compose.ui.unit.Dp,
     onClick: () -> Unit,
+    modifier: Modifier = Modifier,
     enabled: Boolean = true,
     leadingIcon: ImageVector? = null,
     showChevron: Boolean = true,
 ) {
     Row(
-        modifier = Modifier.height(32.dp)
+        modifier = modifier.height(32.dp)
             .clip(RoundedCornerShape(5.dp))
             .clickable(enabled = enabled, onClick = onClick)
             .padding(horizontal = 7.dp),
@@ -3135,7 +3623,7 @@ private data class ComposerMentionOption(
 internal fun desktopSlashCommands(hasThread: Boolean): List<SlashCommand> = buildList {
     add(SlashCommand("model", "Choose the model for this task", Icons.Outlined.SmartToy, SlashCommandAction.MODEL))
     add(SlashCommand("reasoning", "Set reasoning effort", Icons.Outlined.Psychology, SlashCommandAction.REASONING))
-    add(SlashCommand("plan-mode", "Switch this task to Plan mode", Icons.Outlined.Flag, SlashCommandAction.PLAN_MODE))
+    add(SlashCommand("plan", "Switch this task to Plan mode", Icons.Outlined.Flag, SlashCommandAction.PLAN_MODE))
     add(SlashCommand("permissions", "Change approval behavior", Icons.Outlined.Tune, SlashCommandAction.PERMISSIONS))
     add(SlashCommand("skills", "Mention a remote skill", Icons.Outlined.Psychology, SlashCommandAction.SKILLS))
     add(SlashCommand("plugins", "Mention an installed remote plugin", Icons.Outlined.Extension, SlashCommandAction.PLUGINS))
@@ -3260,35 +3748,6 @@ private fun ComposerPopupMessage(message: String) {
         style = MaterialTheme.typography.bodySmall,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
     )
-}
-
-@Composable
-private fun DiffView(diff: String, modifier: Modifier) {
-    if (diff.isBlank()) {
-        Box(modifier, contentAlignment = Alignment.Center) {
-            Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                Icon(Icons.Outlined.Code, contentDescription = null, modifier = Modifier.size(32.dp), tint = MaterialTheme.colorScheme.onSurfaceVariant)
-                Spacer(Modifier.height(10.dp))
-                Text("No changes", style = MaterialTheme.typography.titleMedium)
-            }
-        }
-        return
-    }
-    LazyColumn(modifier, contentPadding = PaddingValues(vertical = 14.dp)) {
-        items(diff.lines()) { line ->
-            val color = when {
-                line.startsWith("+") && !line.startsWith("+++") -> DiffGreen
-                line.startsWith("-") && !line.startsWith("---") -> DiffRed
-                else -> Color.Transparent
-            }
-            Text(
-                line.ifEmpty { " " },
-                modifier = Modifier.fillMaxWidth().background(color).padding(horizontal = 16.dp, vertical = 1.dp),
-                style = MonoText,
-                color = if (color == Color.Transparent) MaterialTheme.colorScheme.onSurface else Color(0xFF1C3324),
-            )
-        }
-    }
 }
 
 @Composable

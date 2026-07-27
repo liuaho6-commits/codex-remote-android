@@ -107,6 +107,13 @@ class ThreadHistoryPaginationTest {
         }
     }
 
+    @Test
+    fun resumeFallsBackToTheCurrentBackwardsCursorField() {
+        assertEquals("page-cursor", selectOlderHistoryCursor("page-cursor", "resume-cursor"))
+        assertEquals("resume-cursor", selectOlderHistoryCursor("", "resume-cursor"))
+        assertNull(selectOlderHistoryCursor(null, ""))
+    }
+
     private fun item(id: String, body: String) = TimelineItem(
         id = id,
         kind = TimelineKind.AGENT,

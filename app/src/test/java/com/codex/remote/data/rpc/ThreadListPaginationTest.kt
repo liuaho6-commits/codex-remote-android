@@ -1,5 +1,6 @@
 package com.codex.remote.data.rpc
 
+import com.codex.remote.BuildConfig
 import com.codex.remote.domain.RemoteThread
 import com.codex.remote.domain.RemoteModel
 import com.codex.remote.domain.ComposerMention
@@ -17,6 +18,18 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ThreadListPaginationTest {
+    @Test
+    fun initializeReportsThePackagedClientVersion() {
+        val params = CodexRpcClient.initializeParams()
+        val clientInfo = params.getValue("clientInfo").jsonObject
+        val capabilities = params.getValue("capabilities").jsonObject
+
+        assertEquals("codex_remote_android", clientInfo.getValue("name").jsonPrimitive.content)
+        assertEquals(BuildConfig.VERSION_NAME, clientInfo.getValue("version").jsonPrimitive.content)
+        assertTrue(capabilities.getValue("experimentalApi").jsonPrimitive.content.toBoolean())
+        assertFalse(capabilities.getValue("requestAttestation").jsonPrimitive.content.toBoolean())
+    }
+
     @Test
     fun listParamsImportAllTopLevelSessionsWithoutCwdFilter() {
         val params = CodexRpcClient.threadListParams(cursor = null)
@@ -47,9 +60,10 @@ class ThreadListPaginationTest {
         assertEquals("/workspace/repo", params.getValue("cwd").jsonPrimitive.content)
         assertEquals("gpt-5.6-sol", params.getValue("model").jsonPrimitive.content)
         assertEquals("on-request", params.getValue("approvalPolicy").jsonPrimitive.content)
+        assertEquals("user", params.getValue("approvalsReviewer").jsonPrimitive.content)
         assertEquals("workspace-write", params.getValue("sandbox").jsonPrimitive.content)
         assertFalse(params.containsKey("effort"))
-        assertTrue(params.keys.all { it in setOf("cwd", "model", "approvalPolicy", "sandbox") })
+        assertTrue(params.keys.all { it in setOf("cwd", "model", "approvalPolicy", "approvalsReviewer", "sandbox") })
     }
 
     @Test
@@ -81,6 +95,7 @@ class ThreadListPaginationTest {
         )
 
         assertEquals("fast", fork.getValue("serviceTier").jsonPrimitive.content)
+        assertEquals("user", fork.getValue("approvalsReviewer").jsonPrimitive.content)
         assertEquals("workspace-write", fork.getValue("permissions").jsonPrimitive.content)
         assertFalse(fork.containsKey("sandbox"))
         assertEquals("inline", review.getValue("delivery").jsonPrimitive.content)
@@ -148,6 +163,7 @@ class ThreadListPaginationTest {
             reasoningEffort = "high",
             serviceTier = "fast",
             approvalPolicy = "on-request",
+            approvalsReviewer = "auto_review",
             permissionProfile = "workspace-write",
             collaborationMode = RemoteCollaborationMode("Plan", "plan", reasoningEffort = "medium"),
             mentions = emptyList(),
@@ -162,6 +178,7 @@ class ThreadListPaginationTest {
         )
 
         assertEquals("fast", params.getValue("serviceTier").jsonPrimitive.content)
+        assertEquals("auto_review", params.getValue("approvalsReviewer").jsonPrimitive.content)
         assertEquals("workspace-write", params.getValue("permissions").jsonPrimitive.content)
         val collaboration = params.getValue("collaborationMode").jsonObject
         assertEquals("plan", collaboration.getValue("mode").jsonPrimitive.content)

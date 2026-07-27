@@ -1,5 +1,6 @@
 package com.codex.remote.data.rpc
 
+import com.codex.remote.BuildConfig
 import com.codex.remote.data.ssh.ActiveSshTransport
 import com.codex.remote.domain.ApprovalKind
 import com.codex.remote.domain.ApprovalQuestion
@@ -7,6 +8,7 @@ import com.codex.remote.domain.ApprovalRequest
 import com.codex.remote.domain.ComposerMention
 import com.codex.remote.domain.ComposerMentionKind
 import com.codex.remote.domain.ComposerImageAttachment
+import com.codex.remote.domain.FileChangeSummary
 import com.codex.remote.domain.ForkedRemoteThread
 import com.codex.remote.domain.RateLimitWindowSnapshot
 import com.codex.remote.domain.ReasoningEffortOption
@@ -71,7 +73,6 @@ sealed interface AppServerEvent {
     data class PlanDelta(val threadId: String?, val itemId: String, val delta: String) : AppServerEvent
     data class ReasoningDelta(val threadId: String?, val itemId: String, val delta: String) : AppServerEvent
     data class OutputDelta(val threadId: String?, val itemId: String, val delta: String) : AppServerEvent
-    data class DiffUpdated(val threadId: String?, val diff: String) : AppServerEvent
     data class TurnRunning(
         val threadId: String?,
         val running: Boolean,
@@ -116,17 +117,7 @@ class CodexRpcClient(
         scope.launch { stderrLoop() }
         val result = request(
             "initialize",
-            buildJsonObject {
-                put("clientInfo", buildJsonObject {
-                    put("name", "codex_remote_android")
-                    put("title", "Codex Remote for Android")
-                    put("version", "0.1.0")
-                })
-                put("capabilities", buildJsonObject {
-                    put("experimentalApi", true)
-                    put("requestAttestation", false)
-                })
-            },
+            initializeParams(),
         )
         notify("initialized", buildJsonObject {})
         return RemoteServerInfo(
@@ -305,11 +296,20 @@ class CodexRpcClient(
         model: String?,
         serviceTier: String?,
         approvalPolicy: String,
+        approvalsReviewer: String,
         permissionProfile: String?,
     ): ForkedRemoteThread {
         val result = request(
             "thread/fork",
-            threadForkParams(threadId, cwd, model, serviceTier, approvalPolicy, permissionProfile),
+            threadForkParams(
+                threadId,
+                cwd,
+                model,
+                serviceTier,
+                approvalPolicy,
+                approvalsReviewer,
+                permissionProfile,
+            ),
         )
         val threadElement = result["thread"] ?: throw RpcException("thread/fork 未返回 thread")
         val thread = parseThread(threadElement) ?: throw RpcException("thread/fork 返回了无效 thread")
@@ -324,6 +324,10 @@ class CodexRpcClient(
                 reasoningEffort = result.string("reasoningEffort"),
                 serviceTier = result.string("serviceTier") ?: serviceTier,
                 cwd = result.string("cwd") ?: thread.cwd,
+                collaborationMode = result.obj("collaborationMode")?.string("mode"),
+                approvalPolicy = result.string("approvalPolicy") ?: approvalPolicy,
+                approvalsReviewer = result.string("approvalsReviewer") ?: approvalsReviewer,
+                permissionProfile = result.obj("activePermissionProfile")?.string("id") ?: permissionProfile,
             ),
         )
     }
@@ -398,35 +402,17 @@ class CodexRpcClient(
         }
     }
 
-    suspend fun readGitDiff(cwd: String): String {
-        val result = request("command/exec", buildJsonObject {
-            put("command", buildJsonArray {
-                add(JsonPrimitive("git"))
-                add(JsonPrimitive("diff"))
-                add(JsonPrimitive("--no-ext-diff"))
-                add(JsonPrimitive("--"))
-            })
-            put("cwd", cwd)
-            put("timeoutMs", 15_000)
-            put("outputBytesCap", 2_000_000)
-            put("sandboxPolicy", buildJsonObject {
-                put("type", "readOnly")
-                put("networkAccess", false)
-            })
-        })
-        return if (result["exitCode"]?.jsonPrimitive?.longOrNull == 0L) result.string("stdout").orEmpty() else ""
-    }
-
     suspend fun startThread(
         cwd: String,
         model: String?,
         serviceTier: String?,
         approvalPolicy: String,
+        approvalsReviewer: String,
         permissionProfile: String?,
     ): StartedRemoteThread {
         val result = request(
             "thread/start",
-            threadStartParams(cwd, model, serviceTier, approvalPolicy, permissionProfile),
+            threadStartParams(cwd, model, serviceTier, approvalPolicy, approvalsReviewer, permissionProfile),
         )
         return StartedRemoteThread(
             id = result.obj("thread")?.string("id") ?: throw RpcException("thread/start 未返回 thread.id"),
@@ -454,7 +440,10 @@ class CodexRpcClient(
                 thread = thread,
                 fallbackCwd = cwd,
                 timeline = parseTurnsTimeline(initialPage.array("data")),
-                olderHistoryCursor = initialPage.string("nextCursor")?.takeIf(String::isNotBlank),
+                olderHistoryCursor = selectOlderHistoryCursor(
+                    initialPageCursor = initialPage.string("nextCursor"),
+                    turnsBackwardsCursor = result.string("turnsBackwardsCursor"),
+                ),
             )
         }
 
@@ -501,6 +490,10 @@ class CodexRpcClient(
         serviceTier = result.string("serviceTier"),
         cwd = result.string("cwd") ?: thread?.string("cwd") ?: fallbackCwd,
         olderHistoryCursor = olderHistoryCursor,
+        collaborationMode = result.obj("collaborationMode")?.string("mode"),
+        approvalPolicy = result.string("approvalPolicy"),
+        approvalsReviewer = result.string("approvalsReviewer"),
+        permissionProfile = result.obj("activePermissionProfile")?.string("id"),
     )
 
     suspend fun loadOlderThreadHistory(threadId: String, cursor: String): RemoteThreadHistoryPage {
@@ -522,6 +515,7 @@ class CodexRpcClient(
         reasoningEffort: String?,
         serviceTier: String?,
         approvalPolicy: String,
+        approvalsReviewer: String,
         permissionProfile: String?,
         collaborationMode: RemoteCollaborationMode?,
         mentions: List<ComposerMention> = emptyList(),
@@ -537,6 +531,7 @@ class CodexRpcClient(
                 reasoningEffort,
                 serviceTier,
                 approvalPolicy,
+                approvalsReviewer,
                 permissionProfile,
                 collaborationMode,
                 mentions,
@@ -717,9 +712,7 @@ class CodexRpcClient(
                     params.string("delta").orEmpty(),
                 ),
             )
-            "turn/diff/updated" -> _events.emit(
-                AppServerEvent.DiffUpdated(params.string("threadId"), params.string("diff").orEmpty()),
-            )
+            "turn/diff/updated" -> Unit
             "turn/started" -> _events.emit(
                 AppServerEvent.TurnRunning(
                     threadId = params.string("threadId"),
@@ -781,6 +774,7 @@ class CodexRpcClient(
                             collaborationMode = settings.obj("collaborationMode")?.string("mode"),
                             permissionProfile = settings.obj("activePermissionProfile")?.string("id"),
                             approvalPolicy = settings.string("approvalPolicy"),
+                            approvalsReviewer = settings.string("approvalsReviewer"),
                         ),
                     ),
                 )
@@ -860,6 +854,18 @@ class CodexRpcClient(
     }
 
     companion object {
+        internal fun initializeParams(): JsonObject = buildJsonObject {
+            put("clientInfo", buildJsonObject {
+                put("name", "codex_remote_android")
+                put("title", "Codex Remote for Android")
+                put("version", BuildConfig.VERSION_NAME)
+            })
+            put("capabilities", buildJsonObject {
+                put("experimentalApi", true)
+                put("requestAttestation", false)
+            })
+        }
+
         internal fun threadResumeParams(
             threadId: String,
             cwd: String,
@@ -918,10 +924,12 @@ class CodexRpcClient(
             model: String?,
             serviceTier: String? = null,
             approvalPolicy: String,
+            approvalsReviewer: String = "user",
             permissionProfile: String? = null,
         ): JsonObject = buildJsonObject {
             put("cwd", cwd)
             put("approvalPolicy", approvalPolicy)
+            put("approvalsReviewer", approvalsReviewer)
             if (permissionProfile.isNullOrBlank()) {
                 put("sandbox", if (approvalPolicy == "never") "danger-full-access" else "workspace-write")
             }
@@ -981,6 +989,7 @@ class CodexRpcClient(
             model: String?,
             serviceTier: String? = null,
             approvalPolicy: String,
+            approvalsReviewer: String = "user",
             permissionProfile: String? = null,
         ): JsonObject = buildJsonObject {
             put("threadId", threadId)
@@ -988,6 +997,7 @@ class CodexRpcClient(
             if (!model.isNullOrBlank()) put("model", model)
             if (!serviceTier.isNullOrBlank()) put("serviceTier", serviceTier)
             put("approvalPolicy", approvalPolicy)
+            put("approvalsReviewer", approvalsReviewer)
             if (permissionProfile.isNullOrBlank()) {
                 put("sandbox", if (approvalPolicy == "never") "danger-full-access" else "workspace-write")
             }
@@ -1038,6 +1048,7 @@ class CodexRpcClient(
             reasoningEffort: String?,
             serviceTier: String? = null,
             approvalPolicy: String,
+            approvalsReviewer: String = "user",
             permissionProfile: String? = null,
             collaborationMode: RemoteCollaborationMode? = null,
             mentions: List<ComposerMention>,
@@ -1046,6 +1057,7 @@ class CodexRpcClient(
             put("threadId", threadId)
             if (cwd.isNotBlank()) put("cwd", cwd)
             put("approvalPolicy", approvalPolicy)
+            put("approvalsReviewer", approvalsReviewer)
             if (!permissionProfile.isNullOrBlank()) {
                 put("permissions", permissionProfile)
             } else if (approvalPolicy == "never") {
@@ -1312,13 +1324,27 @@ class CodexRpcClient(
                     body = item.string("aggregatedOutput").orEmpty(),
                     status = item.string("status").orEmpty(),
                 )
-                "fileChange" -> TimelineItem(
-                    id,
-                    TimelineKind.FILE_CHANGE,
-                    title = item.array("changes").joinToString(", ") { it.asObject()?.string("path").orEmpty() },
-                    body = item.array("changes").joinToString("\n") { it.asObject()?.string("diff").orEmpty() },
-                    status = item.string("status").orEmpty(),
-                )
+                "fileChange" -> {
+                    val changes = item.array("changes").mapNotNull { changeElement ->
+                        val change = changeElement.asObject() ?: return@mapNotNull null
+                        val path = change.string("path")?.takeIf(String::isNotBlank) ?: return@mapNotNull null
+                        val kind = change.obj("kind")?.string("type")
+                            ?: change.string("kind")
+                            ?: "update"
+                        FileChangeSummary(
+                            path = path,
+                            kind = kind,
+                            diff = change.string("diff").orEmpty(),
+                        )
+                    }
+                    TimelineItem(
+                        id,
+                        TimelineKind.FILE_CHANGE,
+                        title = changes.joinToString(", ") { it.path },
+                        status = item.string("status").orEmpty(),
+                        fileChanges = changes,
+                    )
+                }
                 "mcpToolCall", "dynamicToolCall", "collabAgentToolCall" -> TimelineItem(
                     id,
                     TimelineKind.TOOL,
@@ -1447,6 +1473,12 @@ private const val MODEL_PAGE_SIZE = 100
 private const val MCP_STATUS_PAGE_SIZE = 100
 private const val PERMISSION_PROFILE_PAGE_SIZE = 100
 internal const val THREAD_HISTORY_PAGE_SIZE = 5
+
+internal fun selectOlderHistoryCursor(
+    initialPageCursor: String?,
+    turnsBackwardsCursor: String?,
+): String? = initialPageCursor?.takeIf(String::isNotBlank)
+    ?: turnsBackwardsCursor?.takeIf(String::isNotBlank)
 
 private fun RpcException.isHistoryPaginationUnavailable(): Boolean {
     if (code == -32601 || code == -32602) return true

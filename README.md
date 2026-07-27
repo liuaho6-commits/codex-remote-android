@@ -51,6 +51,12 @@ endorsed by OpenAI. Codex and OpenAI are trademarks of their respective owner.
 Open this directory in Android Studio, or run `./gradlew assembleDebug` with
 JDK 17 and Android SDK 35 installed.
 
+Run the device-side regression suite on a connected emulator or Android device:
+
+```text
+./gradlew connectedDebugAndroidTest
+```
+
 The first SSH handshake asks you to verify its SHA-256 host-key fingerprint
 before any password or private key is sent. Subsequent key changes are blocked
 until the saved fingerprint is explicitly cleared by editing the connection.

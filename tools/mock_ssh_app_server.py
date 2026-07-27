@@ -16,6 +16,33 @@ from typing import Any
 import paramiko
 
 
+RICH_MARKDOWN_REPLY = r"""## 远端渲染检查
+
+**粗体应该直接显示为粗体**，而不是保留星号。
+
+行内公式：$E = mc^2$，以及块级公式：
+
+$$
+\int_0^1 x^2\,dx = \frac{1}{3}
+$$
+
+```kotlin
+fun answer(): Int {
+    return 42
+}
+```
+
+| 项目 | 状态 |
+| --- | --- |
+| Markdown | 已渲染 |
+| LaTeX | 已渲染 |
+
+""" + "\n\n".join(
+    f"第 {index} 段用于验证长回复的绝对底部滚动。这里保留足够的正文高度，确保最后一条消息远高于一个手机屏幕。"
+    for index in range(1, 25)
+)
+
+
 class EventLog:
     def __init__(self, path: Path) -> None:
         self.path = path
@@ -83,7 +110,8 @@ class MockAppServer:
             },
         ]
         self.turn_counter = 0
-        self.pending_approval_turn: str | None = None
+        self.pending_approval_turn: tuple[str, str] | None = None
+        self.goals: dict[str, dict[str, Any]] = {}
 
     def send(self, message: dict[str, Any]) -> None:
         self.events.write("server_message", message=message)
@@ -138,10 +166,21 @@ class MockAppServer:
                 {
                     "data": [
                         {
-                            "model": "gpt-5.2-codex",
-                            "displayName": "GPT-5.2 Codex",
+                            "model": "gpt-5.6-sol",
+                            "displayName": "GPT-5.6-Sol",
                             "description": "Local end-to-end QA model",
                             "isDefault": True,
+                            "defaultReasoningEffort": "ultra",
+                            "supportedReasoningEfforts": [
+                                {"reasoningEffort": "medium", "description": "Balanced"},
+                                {"reasoningEffort": "high", "description": "Deep"},
+                                {"reasoningEffort": "ultra", "description": "Maximum"},
+                            ],
+                            "inputModalities": ["text", "image"],
+                            "serviceTiers": [
+                                {"id": "fast", "name": "Fast", "description": "Priority processing"}
+                            ],
+                            "defaultServiceTier": "fast",
                         }
                     ]
                 },
@@ -172,7 +211,19 @@ class MockAppServer:
                 },
             )
         elif method == "permissionProfile/list":
-            self.result(message, {"data": [], "nextCursor": None})
+            self.result(
+                message,
+                {
+                    "data": [
+                        {
+                            "id": "team-safe",
+                            "description": "QA custom profile from the remote host",
+                            "allowed": True,
+                        }
+                    ],
+                    "nextCursor": None,
+                },
+            )
         elif method == "skills/list":
             cwds = message.get("params", {}).get("cwds", ["/workspace/demo"])
             self.result(
@@ -219,9 +270,67 @@ class MockAppServer:
                 },
             )
         elif method == "thread/resume":
-            self.result(message, {"thread": {"id": message["params"]["threadId"]}})
+            thread_id = message["params"]["threadId"]
+            turns = self.thread_turns(thread_id)
+            recent_start = max(0, len(turns) - 5)
+            self.result(
+                message,
+                {
+                    "thread": {"id": thread_id, "cwd": "/workspace/demo"},
+                    "model": "gpt-5.6-sol",
+                    "reasoningEffort": "ultra",
+                    "serviceTier": "fast",
+                    "collaborationMode": {"mode": "default"},
+                    "approvalPolicy": "on-request",
+                    "approvalsReviewer": "user",
+                    "activePermissionProfile": {"id": ":workspace"},
+                    "initialTurnsPage": {"data": list(reversed(turns[recent_start:]))},
+                    "turnsBackwardsCursor": f"history-{recent_start}" if recent_start > 0 else None,
+                },
+            )
+            self.notification(
+                "thread/tokenUsage/updated",
+                {
+                    "threadId": thread_id,
+                    "tokenUsage": {
+                        "total": {
+                            "totalTokens": 114000,
+                            "inputTokens": 108000,
+                            "outputTokens": 6000,
+                        },
+                        "modelContextWindow": 200000,
+                    },
+                },
+            )
         elif method == "thread/read":
             self.result(message, {"thread": self.thread_detail(message["params"]["threadId"])})
+        elif method == "thread/goal/get":
+            thread_id = message.get("params", {}).get("threadId", "")
+            self.result(message, {"goal": self.goals.get(thread_id)})
+        elif method == "thread/goal/set":
+            self.set_thread_goal(message)
+        elif method == "thread/goal/clear":
+            thread_id = message.get("params", {}).get("threadId", "")
+            cleared = self.goals.pop(thread_id, None) is not None
+            self.result(message, {"cleared": cleared})
+            if cleared:
+                self.notification("thread/goal/cleared", {"threadId": thread_id})
+        elif method == "thread/turns/list":
+            params = message.get("params", {})
+            turns = self.thread_turns(params.get("threadId", "thread-demo-primary"))
+            cursor = params.get("cursor", "history-0")
+            try:
+                end = int(cursor.rsplit("-", 1)[1])
+            except (IndexError, ValueError):
+                end = 0
+            start = max(0, end - 5)
+            self.result(
+                message,
+                {
+                    "data": list(reversed(turns[start:end])),
+                    "nextCursor": f"history-{start}" if start > 0 else None,
+                },
+            )
         elif method == "fs/readDirectory":
             path = message.get("params", {}).get("path", "")
             entries_by_path = {
@@ -258,25 +367,74 @@ class MockAppServer:
             self.notification("turn/completed", {"turn": {"id": message["params"]["turnId"], "status": "interrupted"}})
         elif method is None and message.get("id") == 9001 and self.pending_approval_turn is not None:
             self.events.write("approval_response", result=message.get("result", {}))
-            self.finish_approval_turn(self.pending_approval_turn)
+            turn_id, thread_id = self.pending_approval_turn
+            self.finish_approval_turn(turn_id, thread_id)
             self.pending_approval_turn = None
         elif "id" in message:
             self.send({"id": message["id"], "error": {"message": f"Unsupported method: {method}"}})
 
+    def set_thread_goal(self, request: dict[str, Any]) -> None:
+        params = request.get("params", {})
+        thread_id = params.get("threadId", "")
+        current = self.goals.get(thread_id)
+        objective = params.get("objective", current.get("objective") if current else None)
+        if not isinstance(objective, str) or not objective.strip():
+            self.send(
+                {
+                    "id": request["id"],
+                    "error": {"code": -32600, "message": "goal objective must not be empty"},
+                }
+            )
+            return
+        if len(objective) > 4000:
+            self.send(
+                {
+                    "id": request["id"],
+                    "error": {"code": -32600, "message": "goal objective must be at most 4000 characters"},
+                }
+            )
+            return
+
+        now = int(time.time())
+        goal = {
+            "threadId": thread_id,
+            "objective": objective.strip(),
+            "status": params.get("status", current.get("status", "active") if current else "active"),
+            "tokenBudget": params.get("tokenBudget", current.get("tokenBudget") if current else None),
+            "tokensUsed": current.get("tokensUsed", 0) if current else 0,
+            "timeUsedSeconds": current.get("timeUsedSeconds", 0) if current else 0,
+            "createdAt": current.get("createdAt", now) if current else now,
+            "updatedAt": now,
+        }
+        self.goals[thread_id] = goal
+        self.result(request, {"goal": goal})
+        self.notification("thread/goal/updated", {"threadId": thread_id, "goal": goal})
+
     def handle_turn(self, request: dict[str, Any]) -> None:
         self.turn_counter += 1
         turn_id = f"turn-{self.turn_counter}"
+        thread_id = request.get("params", {}).get("threadId", "thread-android")
         prompt = "\n".join(
             item.get("text", "") for item in request.get("params", {}).get("input", []) if item.get("type") == "text"
         )
         self.result(request, {"turn": {"id": turn_id}})
-        self.notification("turn/started", {"turn": {"id": turn_id, "status": "inProgress"}})
+        self.notification(
+            "turn/started",
+            {"threadId": thread_id, "turn": {"id": turn_id, "status": "inProgress"}},
+        )
         self.notification(
             "item/started",
-            {"item": {"type": "userMessage", "id": f"user-{self.turn_counter}", "content": [{"text": prompt}]}},
+            {
+                "threadId": thread_id,
+                "item": {
+                    "type": "userMessage",
+                    "id": f"user-{self.turn_counter}",
+                    "content": [{"type": "text", "text": prompt}],
+                },
+            },
         )
         if prompt.strip().lower() == "request approval":
-            self.pending_approval_turn = turn_id
+            self.pending_approval_turn = (turn_id, thread_id)
             self.send(
                 {
                     "id": 9001,
@@ -285,23 +443,81 @@ class MockAppServer:
                 }
             )
             return
-        self.finish_turn(turn_id, prompt)
+        self.finish_turn(turn_id, thread_id, prompt)
 
-    def finish_turn(self, turn_id: str, prompt: str) -> None:
+    def finish_turn(self, turn_id: str, thread_id: str, prompt: str) -> None:
+        reasoning = {
+            "type": "reasoning",
+            "id": f"reasoning-{self.turn_counter}",
+            "summary": ["检查远端项目并规划验证步骤。"],
+        }
+        self.notification("item/started", {"threadId": thread_id, "item": reasoning})
+        for command_index, (command_text, output) in enumerate(
+            (("pwd", "/workspace/demo\n"), ("git status --short", " M app/src/Main.kt\n")),
+            start=1,
+        ):
+            command = {
+                "type": "commandExecution",
+                "id": f"command-{self.turn_counter}-{command_index}",
+                "command": command_text,
+                "status": "inProgress",
+                "aggregatedOutput": output,
+            }
+            self.notification("item/started", {"threadId": thread_id, "item": command})
+        file_change = {
+            "type": "fileChange",
+            "id": f"files-{self.turn_counter}",
+            "status": "inProgress",
+            "changes": [
+                {
+                    "path": "app/src/Main.kt",
+                    "kind": {"type": "update"},
+                    "diff": "--- a/app/src/Main.kt\n+++ b/app/src/Main.kt\n@@ -1 +1,2 @@\n-old line\n+new line\n+second line",
+                },
+                {
+                    "path": "app/src/Status.kt",
+                    "kind": {"type": "add"},
+                    "diff": "--- /dev/null\n+++ b/app/src/Status.kt\n@@ -0,0 +1 @@\n+val ready = true",
+                },
+            ],
+        }
+        self.notification("item/started", {"threadId": thread_id, "item": file_change})
         item_id = f"agent-{self.turn_counter}"
-        reply = f"SSH app-server is working. Android sent: {prompt}"
-        self.notification("item/started", {"item": {"type": "agentMessage", "id": item_id, "text": ""}})
-        for delta in ("SSH app-server is working. ", f"Android sent: {prompt}"):
-            time.sleep(0.15)
-            self.notification("item/agentMessage/delta", {"itemId": item_id, "delta": delta})
-        self.notification("item/completed", {"item": {"type": "agentMessage", "id": item_id, "text": reply}})
+        reply = f"收到：{prompt}\n\n{RICH_MARKDOWN_REPLY}"
         self.notification(
-            "turn/diff/updated",
-            {"diff": "diff --git a/demo.txt b/demo.txt\n--- a/demo.txt\n+++ b/demo.txt\n@@ -0,0 +1 @@\n+remote qa\n"},
+            "item/started",
+            {"threadId": thread_id, "item": {"type": "agentMessage", "id": item_id, "text": ""}},
         )
-        self.notification("turn/completed", {"turn": {"id": turn_id, "status": "completed"}})
+        for delta in (f"收到：{prompt}\n\n", RICH_MARKDOWN_REPLY):
+            time.sleep(0.15)
+            self.notification(
+                "item/agentMessage/delta",
+                {"threadId": thread_id, "itemId": item_id, "delta": delta},
+            )
+        self.notification(
+            "item/completed",
+            {"threadId": thread_id, "item": {"type": "agentMessage", "id": item_id, "text": reply}},
+        )
+        self.notification(
+            "thread/tokenUsage/updated",
+            {
+                    "threadId": thread_id,
+                    "tokenUsage": {
+                        "total": {
+                            "totalTokens": 128000,
+                            "inputTokens": 120000,
+                            "outputTokens": 8000,
+                        },
+                        "modelContextWindow": 200000,
+                    },
+            },
+        )
+        self.notification(
+            "turn/completed",
+            {"threadId": thread_id, "turn": {"id": turn_id, "status": "completed"}},
+        )
 
-    def finish_approval_turn(self, turn_id: str) -> None:
+    def finish_approval_turn(self, turn_id: str, thread_id: str) -> None:
         command_id = f"command-{self.turn_counter}"
         command = {
             "type": "commandExecution",
@@ -310,9 +526,9 @@ class MockAppServer:
             "status": "completed",
             "aggregatedOutput": " M demo.txt\n",
         }
-        self.notification("item/started", {"item": command})
-        self.notification("item/completed", {"item": command})
-        self.finish_turn(turn_id, "request approval")
+        self.notification("item/started", {"threadId": thread_id, "item": command})
+        self.notification("item/completed", {"threadId": thread_id, "item": command})
+        self.finish_turn(turn_id, thread_id, "request approval")
 
     @staticmethod
     def thread_summary(thread: dict[str, Any]) -> dict[str, Any]:
@@ -326,35 +542,85 @@ class MockAppServer:
         }
 
     @staticmethod
-    def thread_detail(thread_id: str) -> dict[str, Any]:
+    def thread_turns(thread_id: str) -> list[dict[str, Any]]:
         turns = []
         for index in range(1, 25):
+            if index == 24:
+                items = [
+                    {
+                        "type": "userMessage",
+                        "id": "old-user-rich",
+                        "content": [{"type": "text", "text": "Show rich rendering and a long response"}],
+                    },
+                    {
+                        "type": "reasoning",
+                        "id": "old-reasoning-rich",
+                        "summary": ["Verified Markdown, LaTeX, commands and changed files."],
+                    },
+                    {
+                        "type": "commandExecution",
+                        "id": "old-command-rich-1",
+                        "command": "pwd",
+                        "status": "completed",
+                        "aggregatedOutput": "/workspace/demo\n",
+                    },
+                    {
+                        "type": "commandExecution",
+                        "id": "old-command-rich-2",
+                        "command": "git status --short",
+                        "status": "completed",
+                        "aggregatedOutput": " M app/src/Main.kt\n",
+                    },
+                    {
+                        "type": "fileChange",
+                        "id": "old-files-rich",
+                        "status": "completed",
+                        "changes": [
+                            {
+                                "path": "app/src/Main.kt",
+                                "kind": {"type": "update"},
+                                "diff": "--- a/app/src/Main.kt\n+++ b/app/src/Main.kt\n@@ -1 +1,2 @@\n-old\n+new\n+next",
+                            }
+                        ],
+                    },
+                    {
+                        "type": "agentMessage",
+                        "id": "old-agent-rich",
+                        "text": RICH_MARKDOWN_REPLY,
+                    },
+                ]
+            else:
+                items = [
+                    {
+                        "type": "userMessage",
+                        "id": f"old-user-{index}",
+                        "content": [{"type": "text", "text": f"Status request {index}"}],
+                    },
+                    {
+                        "type": "reasoning",
+                        "id": f"old-reasoning-{index}",
+                        "summary": [f"Checked remote state for request {index}."],
+                    },
+                    {
+                        "type": "agentMessage",
+                        "id": f"old-agent-{index}",
+                        "text": f"Remote thread response {index}.",
+                    },
+                ]
             turns.append(
                 {
                     "id": f"turn-existing-{index}",
-                    "items": [
-                        {
-                            "type": "userMessage",
-                            "id": f"old-user-{index}",
-                            "content": [{"type": "text", "text": f"Status request {index}"}],
-                        },
-                        {
-                            "type": "reasoning",
-                            "id": f"old-reasoning-{index}",
-                            "summary": [f"Checked remote state for request {index}."],
-                        },
-                        {
-                            "type": "agentMessage",
-                            "id": f"old-agent-{index}",
-                            "text": f"Remote thread response {index}.",
-                        },
-                    ],
+                    "items": items,
                 }
             )
+        return turns
+
+    @classmethod
+    def thread_detail(cls, thread_id: str) -> dict[str, Any]:
         return {
             "id": thread_id,
             "cwd": "/workspace/demo",
-            "turns": turns,
+            "turns": cls.thread_turns(thread_id),
         }
 
 

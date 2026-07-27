@@ -2,11 +2,13 @@ package com.codex.remote.ui
 
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.collectAsState
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
 import com.codex.remote.AppViewModel
-import com.codex.remote.domain.ConnectionStatus
 import com.codex.remote.ui.screens.ConnectionsScreen
 import com.codex.remote.ui.screens.WorkspaceScreen
 
@@ -15,7 +17,11 @@ fun CodexRemoteApp(viewModel: AppViewModel) {
     val state by viewModel.state.collectAsState()
     val showConnections = state.showConnections || state.activeConnection == null
 
-    if (showConnections) {
+    if (state.isRestoringLastConnection) {
+        Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+            CircularProgressIndicator()
+        }
+    } else if (showConnections) {
         ConnectionsScreen(
             state = state,
             onBack = { viewModel.showConnections(false) },
@@ -62,12 +68,11 @@ fun CodexRemoteApp(viewModel: AppViewModel) {
             onSetServiceTier = viewModel::setServiceTier,
             onSetCollaborationMode = viewModel::setCollaborationMode,
             onSetPermissionProfile = viewModel::setPermissionProfile,
-            onSetApprovalPolicy = viewModel::setApprovalPolicy,
+            onSetPermissionMode = viewModel::setPermissionMode,
             onLoadRemoteDirectory = viewModel::loadRemoteDirectory,
             onClearRemoteDirectory = viewModel::clearRemoteDirectory,
             onStartLogin = viewModel::startRemoteLogin,
             onCancelLogin = viewModel::cancelRemoteLogin,
-            onSetPane = viewModel::setPane,
             onApproval = viewModel::respondToApproval,
             onTrustHostKey = viewModel::trustPendingHostKey,
             onRejectHostKey = viewModel::rejectPendingHostKey,

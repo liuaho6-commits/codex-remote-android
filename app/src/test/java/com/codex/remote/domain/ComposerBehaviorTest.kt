@@ -45,14 +45,14 @@ class ComposerBehaviorTest {
         val beforeThread = desktopSlashCommands(hasThread = false).map { it.name }
         val withThread = desktopSlashCommands(hasThread = true).map { it.name }
 
-        assertTrue("plan-mode" in beforeThread)
+        assertTrue("plan" in beforeThread)
         assertTrue("compact" in beforeThread)
         assertTrue("review-mode" in withThread)
     }
 
     @Test
     fun combinedModelSummaryOnlyShowsFastWhenEnabled() {
-        assertEquals("5.6 Sol · 极高", modelSettingsSummary("5.6 Sol", "ultra", null))
-        assertEquals("5.6 Sol · 极高 · Fast", modelSettingsSummary("5.6 Sol", "ultra", "Fast"))
+        assertEquals("5.6-sol · 极高", modelSettingsSummary("gpt-5.6-sol", "ultra", null))
+        assertEquals("5.6-sol · 极高 · Fast", modelSettingsSummary("gpt-5.6-sol", "ultra", "Fast"))
     }
 }

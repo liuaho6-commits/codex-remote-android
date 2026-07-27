@@ -207,6 +207,7 @@ data class RemoteThreadSettingsSnapshot(
     val collaborationMode: String?,
     val permissionProfile: String?,
     val approvalPolicy: String?,
+    val approvalsReviewer: String?,
 )
 
 data class ComposerImageAttachment(
@@ -246,6 +247,10 @@ data class RemoteThreadSession(
     val serviceTier: String?,
     val cwd: String,
     val olderHistoryCursor: String? = null,
+    val collaborationMode: String? = null,
+    val approvalPolicy: String? = null,
+    val approvalsReviewer: String? = null,
+    val permissionProfile: String? = null,
 )
 
 data class RemoteThreadHistoryPage(
@@ -342,9 +347,18 @@ data class TimelineItem(
     val body: String = "",
     val status: String = "",
     val expanded: Boolean = false,
+    val fileChanges: List<FileChangeSummary> = emptyList(),
+)
+
+data class FileChangeSummary(
+    val path: String,
+    val kind: String,
+    val diff: String,
 )
 
 enum class ApprovalKind { COMMAND, FILE_CHANGE, PERMISSION, USER_INPUT, UNKNOWN }
+
+enum class PermissionMode { ASK, AUTO_REVIEW, FULL_ACCESS, READ_ONLY }
 
 data class ApprovalQuestion(
     val id: String,
@@ -364,8 +378,6 @@ data class ApprovalRequest(
 )
 
 enum class ConnectionStatus { DISCONNECTED, CONNECTING, CONNECTED, ERROR }
-
-enum class WorkspacePane { CHAT, CHANGES }
 
 data class AppUiState(
     val savedConnections: List<SavedConnection> = emptyList(),
@@ -404,6 +416,7 @@ data class AppUiState(
     val selectedCollaborationMode: String = "default",
     val permissionProfiles: List<RemotePermissionProfile> = emptyList(),
     val selectedPermissionProfile: String? = null,
+    val approvalsReviewer: String = "user",
     val remoteServer: RemoteServerInfo? = null,
     val remoteAccount: RemoteAccount? = null,
     val remoteDeviceLogin: RemoteDeviceLogin? = null,
@@ -424,8 +437,7 @@ data class AppUiState(
     val activeTurnId: String? = null,
     val pendingApproval: ApprovalRequest? = null,
     val pendingHostKeyFingerprint: String? = null,
-    val aggregatedDiff: String = "",
-    val activePane: WorkspacePane = WorkspacePane.CHAT,
+    val isRestoringLastConnection: Boolean = true,
     val showConnections: Boolean = false,
     val showConnectionEditor: Boolean = false,
     val editingConnection: SavedConnection? = null,
@@ -462,7 +474,6 @@ internal fun AppUiState.withThreadArchived(threadId: String): AppUiState {
         isOlderHistoryLoading = if (archivedSelectedThread) false else isOlderHistoryLoading,
         olderHistoryError = if (archivedSelectedThread) null else olderHistoryError,
         consumedHistoryCursors = if (archivedSelectedThread) emptySet() else consumedHistoryCursors,
-        aggregatedDiff = if (archivedSelectedThread) "" else aggregatedDiff,
     )
 }
 

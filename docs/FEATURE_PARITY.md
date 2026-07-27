@@ -14,9 +14,9 @@ Audit baseline:
 | Thread lifecycle | Start, paginated resume, rename, pin, archive, browse archived tasks, unarchive, permanently delete, fork, and compact. |
 | Turns | Load the latest five full turns first, fetch older pages at the top with `thread/turns/list`, preserve scroll position, start, stream, steer, interrupt, and render every current `ThreadItem` variant. |
 | Composer | Desktop-style plus menu, remote file/folder references, Android image input, Goal/Plan actions, remote skill/plugin `$` mentions, slash commands, model, reasoning, service tier, collaboration mode, and permissions. |
-| Commands | `/compact`, `/feedback`, `/fork`, `/goal`, `/init`, `/mcp`, `/model`, `/new`, `/plan-mode`, `/reasoning`, `/review-mode`, and `/status`, plus task-management shortcuts. |
+| Commands | `/compact`, `/feedback`, `/fork`, `/goal`, `/init`, `/mcp`, `/model`, `/new`, `/plan`, `/reasoning`, `/review-mode`, and `/status`, plus task-management shortcuts. |
 | Goals | Read, create, edit, pause, resume, clear, and continue persisted remote goals. |
-| Review and changes | Start inline reviews, display the remote repository diff, and preserve the conversation position when switching between Chat and Changes. |
+| Review and file changes | Start inline reviews and render structured, expandable changed-file summaries in the conversation. There is no separate Changes tab. |
 | Long conversations | Open at the latest message, load older turns incrementally while scrolling upward, preserve the visible anchor during prepend, and show a return-to-latest button away from the bottom. |
 | MCP | Show server/tool/resource status, start OAuth, observe completion, and reload remote MCP configuration. |
 | Authentication | Reuse remote auth and support the ChatGPT device-code flow. |

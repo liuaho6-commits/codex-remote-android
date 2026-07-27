@@ -15,6 +15,7 @@ import com.codex.remote.domain.ConnectionStatus
 import com.codex.remote.domain.ComposerMention
 import com.codex.remote.domain.ComposerMentionKind
 import com.codex.remote.domain.ComposerImageAttachment
+import com.codex.remote.domain.PermissionMode
 import com.codex.remote.domain.RemoteCollaborationMode
 import com.codex.remote.domain.RemoteProject
 import com.codex.remote.domain.RemoteAccount
@@ -27,7 +28,6 @@ import com.codex.remote.domain.SavedConnection
 import com.codex.remote.domain.TimelineItem
 import com.codex.remote.domain.TimelineKind
 import com.codex.remote.domain.ThreadGoalStatus
-import com.codex.remote.domain.WorkspacePane
 import com.codex.remote.domain.groupThreadsByProject
 import com.codex.remote.domain.mergeTimelineHistory
 import com.codex.remote.domain.composerToken
@@ -35,10 +35,7 @@ import com.codex.remote.domain.containsComposerToken
 import com.codex.remote.domain.withThreadArchived
 import com.codex.remote.domain.withThreadRenamed
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.currentCoroutineContext
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -56,19 +53,36 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     private var rpc: CodexRpcClient? = null
     private var eventJob: Job? = null
-    private var goalContinuationJob: Job? = null
+    private var didRestoreLastConnection = false
 
     init {
         viewModelScope.launch {
             store.connections.collect { connections ->
+                val sortedConnections = connections.sortedByDescending { it.lastUsedAt }
+                val connectionToRestore = if (!didRestoreLastConnection) {
+                    didRestoreLastConnection = true
+                    sortedConnections.lastUsedConnectionOrNull()
+                } else {
+                    null
+                }
+                val restoreConnection = connectionToRestore?.takeIf { _state.value.activeConnection == null }
                 _state.update { current ->
+                    val refreshedActive = current.activeConnection?.let { active ->
+                        connections.firstOrNull { it.id == active.id } ?: active
+                    }
                     current.copy(
-                        savedConnections = connections.sortedByDescending { it.lastUsedAt },
-                        activeConnection = current.activeConnection?.let { active ->
-                            connections.firstOrNull { it.id == active.id } ?: active
+                        savedConnections = sortedConnections,
+                        activeConnection = restoreConnection ?: refreshedActive,
+                        connectionStatus = if (restoreConnection != null) ConnectionStatus.CONNECTING else current.connectionStatus,
+                        connectionMessage = if (restoreConnection != null) {
+                            "正在连接 ${restoreConnection.host}…"
+                        } else {
+                            current.connectionMessage
                         },
+                        isRestoringLastConnection = false,
                     )
                 }
+                restoreConnection?.let(::connect)
             }
         }
     }
@@ -146,6 +160,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     selectedCollaborationMode = "default",
                     permissionProfiles = emptyList(),
                     selectedPermissionProfile = null,
+                    approvalsReviewer = "user",
                     remoteServer = null,
                     remoteAccount = null,
                     remoteDeviceLogin = null,
@@ -161,7 +176,6 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     threadTokenUsage = null,
                     isStatusLoading = false,
                     statusError = null,
-                    aggregatedDiff = "",
                     pendingHostKeyFingerprint = null,
                     notice = null,
                 )
@@ -267,7 +281,6 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun disconnectInternal(clearActive: Boolean) {
-        cancelGoalContinuation()
         eventJob?.cancel()
         eventJob = null
         rpc?.close()
@@ -301,6 +314,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 selectedCollaborationMode = "default",
                 permissionProfiles = emptyList(),
                 selectedPermissionProfile = null,
+                approvalsReviewer = "user",
                 remoteServer = null,
                 remoteAccount = null,
                 remoteDeviceLogin = null,
@@ -320,13 +334,11 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 activeTurnId = null,
                 pendingApproval = null,
                 pendingHostKeyFingerprint = null,
-                aggregatedDiff = "",
             )
         }
     }
 
     fun newThread() {
-        cancelGoalContinuation()
         _state.update { state ->
             val projectPath = state.selectedProjectPath ?: state.projects.firstOrNull()?.path
             if (state.remoteAccount?.canRunCodex != true) {
@@ -347,15 +359,13 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     isOlderHistoryLoading = false,
                     olderHistoryError = null,
                     consumedHistoryCursors = emptySet(),
-                    aggregatedDiff = "",
-                    activePane = WorkspacePane.CHAT,
+                    selectedCollaborationMode = state.defaultCollaborationMode(),
                 )
             }
         }
     }
 
     fun selectProject(project: RemoteProject) {
-        cancelGoalContinuation()
         _state.update {
             it.copy(
                 selectedProjectPath = project.path,
@@ -370,8 +380,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 isOlderHistoryLoading = false,
                 olderHistoryError = null,
                 consumedHistoryCursors = emptySet(),
-                aggregatedDiff = "",
-                activePane = WorkspacePane.CHAT,
+                selectedCollaborationMode = it.defaultCollaborationMode(),
             )
         }
     }
@@ -379,7 +388,6 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     fun selectThread(thread: RemoteThread) {
         if (_state.value.activeConnection == null) return
         val client = rpc ?: return
-        cancelGoalContinuation()
         viewModelScope.launch {
             val projectPath = _state.value.projects
                 .firstOrNull { project -> project.threads.any { it.id == thread.id } }
@@ -402,8 +410,6 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     isBusy = true,
                     isTurnRunning = thread.status.isRemoteThreadActive(),
                     activeTurnId = null,
-                    aggregatedDiff = "",
-                    activePane = WorkspacePane.CHAT,
                 )
             }
             val session = runCatching { client.resumeThread(thread.id, thread.cwd) }
@@ -433,9 +439,14 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     selectedServiceTier = session.serviceTier
                         ?.takeIf { tier -> model?.serviceTiers?.any { it.id == tier } == true }
                         ?: model?.defaultServiceTier,
+                    selectedCollaborationMode = session.collaborationMode
+                        ?.takeIf { mode -> state.collaborationModes.any { it.mode == mode } }
+                        ?: state.defaultCollaborationMode(),
+                    selectedPermissionProfile = session.permissionProfile,
+                    approvalPolicy = session.approvalPolicy ?: state.approvalPolicy,
+                    approvalsReviewer = session.approvalsReviewer ?: state.approvalsReviewer,
                 )
             }
-            refreshSelectedDiff(thread.id, session.cwd)
             runCatching { client.getThreadGoal(thread.id) }
                 .onSuccess { goal ->
                     _state.update { state ->
@@ -449,16 +460,23 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                             state
                         }
                     }
-                    if (goal?.status == ThreadGoalStatus.ACTIVE) maybeContinueActiveThreadGoal()
                 }
                 .onFailure { error ->
                     _state.update { state ->
                         if (state.selectedThreadId == thread.id) {
-                            state.copy(
-                                threadGoal = null,
-                                isGoalLoading = false,
-                                goalError = friendlyGoalError(error),
-                            )
+                            if (error.isUnsupportedRpcMethod("thread/goal/get")) {
+                                state.copy(
+                                    threadGoal = null,
+                                    isGoalLoading = false,
+                                    goalError = null,
+                                )
+                            } else {
+                                state.copy(
+                                    threadGoal = null,
+                                    isGoalLoading = false,
+                                    goalError = friendlyGoalError(error),
+                                )
+                            }
                         } else {
                             state
                         }
@@ -556,6 +574,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         val selectedReasoningEffort = currentState.selectedReasoningEffort
         val selectedServiceTier = currentState.selectedServiceTier
         val approvalPolicy = currentState.approvalPolicy
+        val approvalsReviewer = currentState.approvalsReviewer
         val permissionProfile = currentState.selectedPermissionProfile
         val collaborationMode = currentState.collaborationModes
             .firstOrNull { it.mode == currentState.selectedCollaborationMode }
@@ -604,6 +623,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     model = selectedModel,
                     serviceTier = selectedServiceTier,
                     approvalPolicy = approvalPolicy,
+                    approvalsReviewer = approvalsReviewer,
                     permissionProfile = permissionProfile,
                 ).let { started ->
                     _state.update {
@@ -626,6 +646,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     reasoningEffort = selectedReasoningEffort,
                     serviceTier = selectedServiceTier,
                     approvalPolicy = approvalPolicy,
+                    approvalsReviewer = approvalsReviewer,
                     permissionProfile = permissionProfile,
                     collaborationMode = collaborationMode,
                     mentions = mentions,
@@ -668,7 +689,6 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             runCatching { client.archiveThread(thread.id) }
                 .onSuccess {
-                    if (_state.value.selectedThreadId == thread.id) cancelGoalContinuation()
                     _state.update { state ->
                         state.withThreadArchived(thread.id).copy(
                             archivedThreads = (listOf(thread) + state.archivedThreads)
@@ -796,10 +816,10 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     model = snapshot.selectedModel,
                     serviceTier = snapshot.selectedServiceTier,
                     approvalPolicy = snapshot.approvalPolicy,
+                    approvalsReviewer = snapshot.approvalsReviewer,
                     permissionProfile = snapshot.selectedPermissionProfile,
                 )
             }.onSuccess { forked ->
-                cancelGoalContinuation()
                 _state.update { state ->
                     val threads = (listOf(forked.thread) + state.threads).distinctBy { it.id }
                     val model = state.models.firstOrNull { it.id == forked.session.model }
@@ -826,13 +846,16 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                         selectedServiceTier = forked.session.serviceTier
                             ?.takeIf { tier -> model?.serviceTiers?.any { it.id == tier } == true }
                             ?: model?.defaultServiceTier,
-                        aggregatedDiff = "",
-                        activePane = WorkspacePane.CHAT,
+                        selectedCollaborationMode = forked.session.collaborationMode
+                            ?.takeIf { mode -> state.collaborationModes.any { it.mode == mode } }
+                            ?: state.defaultCollaborationMode(),
+                        selectedPermissionProfile = forked.session.permissionProfile,
+                        approvalPolicy = forked.session.approvalPolicy ?: state.approvalPolicy,
+                        approvalsReviewer = forked.session.approvalsReviewer ?: state.approvalsReviewer,
                         isBusy = false,
                         notice = "已继续到新的远端任务",
                     )
                 }
-                refreshSelectedDiff(forked.thread.id, forked.session.cwd)
             }.onFailure(::showError)
         }
     }
@@ -860,7 +883,6 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                         it.copy(
                             isTurnRunning = true,
                             activeTurnId = review.turnId,
-                            activePane = WorkspacePane.CHAT,
                         )
                     }
                 }
@@ -1026,7 +1048,6 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                         state
                     }
                 }
-                maybeContinueActiveThreadGoal()
             }.onFailure { error ->
                 updateGoalFailure(threadId, "Failed to set goal", error)
             }
@@ -1039,7 +1060,6 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             showGoalRequirement()
             return
         }
-        if (status != ThreadGoalStatus.ACTIVE) cancelGoalContinuation()
         viewModelScope.launch {
             _state.update { it.copy(isGoalLoading = true, goalError = null) }
             runCatching { client.setThreadGoal(threadId = threadId, status = status) }
@@ -1051,7 +1071,6 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                             state
                         }
                     }
-                    if (status == ThreadGoalStatus.ACTIVE) maybeContinueActiveThreadGoal()
                 }
                 .onFailure { error ->
                     updateGoalFailure(threadId, "Failed to update goal", error)
@@ -1062,7 +1081,6 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     fun clearThreadGoal() {
         val client = rpc ?: return
         val threadId = _state.value.selectedThreadId ?: return
-        cancelGoalContinuation()
         viewModelScope.launch {
             _state.update { it.copy(isGoalLoading = true, goalError = null) }
             runCatching { client.clearThreadGoal(threadId) }
@@ -1092,8 +1110,12 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     }
                 }
                 .onFailure { error ->
-                    _state.update {
-                        it.copy(isStatusLoading = false, statusError = friendlyError(error))
+                    _state.update { state ->
+                        if (error.isUnsupportedRpcMethod("account/rateLimits/read")) {
+                            state.copy(rateLimits = null, isStatusLoading = false, statusError = null)
+                        } else {
+                            state.copy(isStatusLoading = false, statusError = friendlyError(error))
+                        }
                     }
                 }
         }
@@ -1168,24 +1190,49 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     fun setCollaborationMode(mode: String) = _state.update { state ->
         if (state.collaborationModes.any { it.mode == mode }) {
-            state.copy(selectedCollaborationMode = mode, notice = null)
+            state.copy(
+                selectedCollaborationMode = mode,
+                notice = if (mode == "plan") "已切换到计划模式" else null,
+            )
         } else {
             state.copy(notice = "远端 Codex 没有提供 $mode 模式")
         }
     }
 
     fun setPermissionProfile(profileId: String?) = _state.update { state ->
-        if (profileId == null || state.permissionProfiles.any { it.id == profileId && it.allowed }) {
+        if (profileId == null || profileId in BUILT_IN_PERMISSION_PROFILES ||
+            state.permissionProfiles.any { it.id == profileId && it.allowed }
+        ) {
             state.copy(selectedPermissionProfile = profileId)
         } else {
             state
         }
     }
 
-    fun setApprovalPolicy(policy: String) = _state.update {
-        it.copy(approvalPolicy = policy, selectedPermissionProfile = null)
+    fun setPermissionMode(mode: PermissionMode) = _state.update { state ->
+        when (mode) {
+            PermissionMode.ASK -> state.copy(
+                selectedPermissionProfile = ":workspace",
+                approvalPolicy = "on-request",
+                approvalsReviewer = "user",
+            )
+            PermissionMode.AUTO_REVIEW -> state.copy(
+                selectedPermissionProfile = ":workspace",
+                approvalPolicy = "on-request",
+                approvalsReviewer = "auto_review",
+            )
+            PermissionMode.FULL_ACCESS -> state.copy(
+                selectedPermissionProfile = ":danger-full-access",
+                approvalPolicy = "never",
+                approvalsReviewer = "user",
+            )
+            PermissionMode.READ_ONLY -> state.copy(
+                selectedPermissionProfile = ":read-only",
+                approvalPolicy = "on-request",
+                approvalsReviewer = "user",
+            )
+        }
     }
-    fun setPane(pane: WorkspacePane) = _state.update { it.copy(activePane = pane) }
     fun loadRemoteDirectory(path: String) {
         val client = rpc ?: return
         if (path.isBlank()) return
@@ -1244,23 +1291,21 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     is AppServerEvent.PlanDelta -> appendDelta(event.threadId, event.itemId, event.delta, TimelineKind.PLAN)
                     is AppServerEvent.ReasoningDelta -> appendDelta(event.threadId, event.itemId, event.delta, TimelineKind.REASONING)
                     is AppServerEvent.OutputDelta -> appendDelta(event.threadId, event.itemId, event.delta, TimelineKind.COMMAND)
-                    is AppServerEvent.DiffUpdated -> _state.update { state ->
-                        if (state.acceptsThreadEvent(event.threadId)) state.copy(aggregatedDiff = event.diff) else state
-                    }
                     is AppServerEvent.TurnRunning -> {
                         if (!_state.value.acceptsThreadEvent(event.threadId)) return@collect
-                        _state.update {
-                            it.copy(
+                        _state.update { state ->
+                            state.copy(
                                 isTurnRunning = event.running,
                                 activeTurnId = if (event.running) event.turnId else null,
+                                timeline = if (event.running) {
+                                    state.timeline
+                                } else {
+                                    state.timeline.withRunningItemsCompleted()
+                                },
                             )
                         }
-                        if (event.running) {
-                            cancelGoalContinuation()
-                        } else {
+                        if (!event.running) {
                             refreshThreads()
-                            refreshSelectedDiff()
-                            maybeContinueActiveThreadGoal()
                         }
                     }
                     is AppServerEvent.Approval -> _state.update { state ->
@@ -1277,7 +1322,6 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                         }
                     }
                     is AppServerEvent.GoalCleared -> {
-                        if (_state.value.selectedThreadId == event.threadId) cancelGoalContinuation()
                         _state.update { state ->
                             if (state.selectedThreadId == event.threadId) {
                                 state.copy(threadGoal = null, isGoalLoading = false, goalError = null)
@@ -1335,6 +1379,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                                 ?: state.selectedCollaborationMode,
                             selectedPermissionProfile = event.settings.permissionProfile,
                             approvalPolicy = event.settings.approvalPolicy ?: state.approvalPolicy,
+                            approvalsReviewer = event.settings.approvalsReviewer ?: state.approvalsReviewer,
                         )
                     }
                     is AppServerEvent.LoginCompleted -> {
@@ -1353,7 +1398,12 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     }
                     is AppServerEvent.Failure -> _state.update { state ->
                         if (state.acceptsThreadEvent(event.threadId)) {
-                            state.copy(notice = event.message, isTurnRunning = false, activeTurnId = null)
+                            state.copy(
+                                notice = event.message,
+                                isTurnRunning = false,
+                                activeTurnId = null,
+                                timeline = state.timeline.withRunningItemsCompleted(),
+                            )
                         } else {
                             state
                         }
@@ -1401,49 +1451,6 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    private fun maybeContinueActiveThreadGoal() {
-        if (goalContinuationJob?.isActive == true) return
-        val client = rpc ?: return
-        val snapshot = _state.value
-        val threadId = snapshot.selectedThreadId ?: return
-        if (snapshot.threadGoal?.status != ThreadGoalStatus.ACTIVE ||
-            snapshot.isTurnRunning || snapshot.pendingApproval != null
-        ) {
-            return
-        }
-        goalContinuationJob = viewModelScope.launch {
-            try {
-                delay(GOAL_CONTINUATION_DELAY_MS)
-                val current = _state.value
-                if (current.selectedThreadId != threadId ||
-                    current.threadGoal?.status != ThreadGoalStatus.ACTIVE ||
-                    current.isTurnRunning || current.pendingApproval != null
-                ) {
-                    return@launch
-                }
-                val goal = client.setThreadGoal(threadId = threadId, status = ThreadGoalStatus.ACTIVE)
-                _state.update { state ->
-                    if (state.selectedThreadId == threadId) {
-                        state.copy(threadGoal = goal, goalError = null)
-                    } else {
-                        state
-                    }
-                }
-            } catch (cancelled: CancellationException) {
-                throw cancelled
-            } catch (error: Throwable) {
-                updateGoalFailure(threadId, "Failed to continue goal", error, loading = false)
-            } finally {
-                if (goalContinuationJob === currentCoroutineContext()[Job]) goalContinuationJob = null
-            }
-        }
-    }
-
-    private fun cancelGoalContinuation() {
-        goalContinuationJob?.cancel()
-        goalContinuationJob = null
-    }
-
     private fun updateGoalFailure(
         threadId: String,
         action: String,
@@ -1474,6 +1481,10 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 "远端 Codex 未启用 Goals；请在远端 config.toml 的 [features] 下设置 goals = true 后重连"
             message.contains("ephemeral thread does not support goals", ignoreCase = true) ->
                 "该任务尚未持久化，发送第一条消息后才能设置 Goal"
+            error.isUnsupportedRpcMethod("thread/goal/get") ||
+                error.isUnsupportedRpcMethod("thread/goal/set") ||
+                error.isUnsupportedRpcMethod("thread/goal/clear") ->
+                "远端 Codex 版本不支持 Goal，请先更新远端 Codex"
             message.contains("method not found", ignoreCase = true) ||
                 message.contains("unknown method", ignoreCase = true) ->
                 "远端 Codex 版本不支持 Goal，请先更新远端 Codex"
@@ -1544,25 +1555,6 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                                 state.remoteServer?.codexVersion.orEmpty(),
                             ),
                         )
-                    }
-                }
-        }
-    }
-
-    private fun refreshSelectedDiff(
-        expectedThreadId: String? = _state.value.selectedThreadId,
-        cwdOverride: String? = null,
-    ) {
-        val client = rpc ?: return
-        val threadId = expectedThreadId ?: return
-        val cwd = cwdOverride?.takeIf(String::isNotBlank)
-            ?: _state.value.threads.firstOrNull { it.id == threadId }?.cwd?.takeIf(String::isNotBlank)
-            ?: return
-        viewModelScope.launch {
-            runCatching { client.readGitDiff(cwd) }
-                .onSuccess { diff ->
-                    _state.update { state ->
-                        if (state.selectedThreadId == threadId) state.copy(aggregatedDiff = diff) else state
                     }
                 }
         }
@@ -1644,7 +1636,19 @@ private data class ConnectionBootstrap(
 )
 
 internal fun AppUiState.acceptsThreadEvent(threadId: String?): Boolean =
-    threadId.isNullOrBlank() || selectedThreadId == threadId
+    selectedThreadId != null && selectedThreadId == threadId
+
+internal fun List<SavedConnection>.lastUsedConnectionOrNull(): SavedConnection? =
+    maxByOrNull(SavedConnection::lastUsedAt)?.takeIf { it.lastUsedAt > 0 }
+
+internal fun Throwable.isUnsupportedRpcMethod(method: String): Boolean =
+    generateSequence(this) { it.cause }.any { error ->
+        val message = error.message.orEmpty()
+        (error as? com.codex.remote.data.rpc.RpcException)?.code == -32601 ||
+            (message.contains(method, ignoreCase = true) &&
+                listOf("unsupported method", "method not found", "unknown method", "not implemented")
+                    .any { marker -> message.contains(marker, ignoreCase = true) })
+    }
 
 private data class ComposerCatalog(
     val skills: List<com.codex.remote.domain.RemoteSkill>,
@@ -1680,6 +1684,21 @@ private fun RemoteModel.preferredReasoningEffort(): String? =
     defaultReasoningEffort?.takeIf(::supports)
         ?: supportedReasoningEfforts.firstOrNull()?.value
 
+private fun AppUiState.defaultCollaborationMode(): String =
+    collaborationModes.firstOrNull { it.mode == "default" }?.mode
+        ?: collaborationModes.firstOrNull()?.mode
+        ?: "default"
+
+private fun String.isActiveTimelineStatus(): Boolean =
+    equals("inProgress", ignoreCase = true) ||
+        equals("in_progress", ignoreCase = true) ||
+        equals("running", ignoreCase = true) ||
+    equals("started", ignoreCase = true)
+
+internal fun List<TimelineItem>.withRunningItemsCompleted(): List<TimelineItem> = map { item ->
+    if (item.status.isActiveTimelineStatus()) item.copy(status = "completed") else item
+}
+
 private fun String.isRemoteThreadActive(): Boolean =
     equals("active", ignoreCase = true) || equals("inProgress", ignoreCase = true)
 
@@ -1706,4 +1725,4 @@ private val INIT_PROMPT = """
     - Add other relevant sections such as security, configuration, architecture, or agent instructions when appropriate.
 """.trimIndent()
 
-private const val GOAL_CONTINUATION_DELAY_MS = 250L
+private val BUILT_IN_PERMISSION_PROFILES = setOf(":workspace", ":danger-full-access", ":read-only")

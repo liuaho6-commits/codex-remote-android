@@ -37,14 +37,16 @@ class CodexRpcParsingTest {
     }
 
     @Test
-    fun combinesFileChangePathsAndDiffs() {
+    fun parsesStructuredFileChanges() {
         val item = parse(
             """{"type":"fileChange","id":"patch-1","status":"completed","changes":[{"path":"a.kt","kind":{"type":"update","move_path":null},"diff":"-a\n+b"},{"path":"b.kt","kind":{"type":"add"},"diff":"+new"}]}""",
         )
 
         assertEquals(TimelineKind.FILE_CHANGE, item?.kind)
         assertEquals("a.kt, b.kt", item?.title)
-        assertEquals("-a\n+b\n+new", item?.body)
+        assertEquals(listOf("a.kt", "b.kt"), item?.fileChanges?.map { it.path })
+        assertEquals(listOf("update", "add"), item?.fileChanges?.map { it.kind })
+        assertEquals(listOf("-a\n+b", "+new"), item?.fileChanges?.map { it.diff })
     }
 
     @Test
