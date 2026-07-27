@@ -1,0 +1,11 @@
+-keep class net.schmizz.sshj.** { *; }
+-dontwarn org.bouncycastle.**
+-dontwarn net.i2p.crypto.eddsa.**
+-dontwarn javax.security.auth.login.LoginContext
+-dontwarn org.ietf.jgss.GSSContext
+-dontwarn org.ietf.jgss.GSSCredential
+-dontwarn org.ietf.jgss.GSSException
+-dontwarn org.ietf.jgss.GSSManager
+-dontwarn org.ietf.jgss.GSSName
+-dontwarn org.ietf.jgss.MessageProp
+-dontwarn org.ietf.jgss.Oid
