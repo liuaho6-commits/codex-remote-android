@@ -205,7 +205,7 @@ fun WorkspaceScreen(
     onUnarchiveThread: (RemoteThread) -> Unit,
     onDeleteArchivedThread: (RemoteThread) -> Unit,
     onSetThreadPinned: (RemoteThread, Boolean) -> Unit,
-    onSend: (String, List<ComposerMention>, List<ComposerImageAttachment>) -> Unit,
+    onSend: (String, List<ComposerMention>, List<ComposerImageAttachment>, Boolean) -> Unit,
     onStop: () -> Unit,
     onCompactThread: () -> Unit,
     onForkThread: () -> Unit,
@@ -216,7 +216,6 @@ fun WorkspaceScreen(
     onStartMcpLogin: (String) -> Unit,
     onMcpAuthorizationHandled: () -> Unit,
     onSubmitFeedback: (String, String) -> Unit,
-    onShowGoalRequirement: () -> Unit,
     onSetGoal: (String) -> Unit,
     onSetGoalStatus: (ThreadGoalStatus) -> Unit,
     onClearGoal: () -> Unit,
@@ -287,7 +286,6 @@ fun WorkspaceScreen(
                     onReloadMcpServers = onReloadMcpServers,
                     onStartMcpLogin = onStartMcpLogin,
                     onSubmitFeedback = onSubmitFeedback,
-                    onShowGoalRequirement = onShowGoalRequirement,
                     onSetGoal = onSetGoal,
                     onSetGoalStatus = onSetGoalStatus,
                     onClearGoal = onClearGoal,
@@ -363,7 +361,6 @@ fun WorkspaceScreen(
                     onReloadMcpServers = onReloadMcpServers,
                     onStartMcpLogin = onStartMcpLogin,
                     onSubmitFeedback = onSubmitFeedback,
-                    onShowGoalRequirement = onShowGoalRequirement,
                     onSetGoal = onSetGoal,
                     onSetGoalStatus = onSetGoalStatus,
                     onClearGoal = onClearGoal,
@@ -771,7 +768,7 @@ private fun WorkspaceContent(
     state: AppUiState,
     showMenu: Boolean,
     onMenu: () -> Unit,
-    onSend: (String, List<ComposerMention>, List<ComposerImageAttachment>) -> Unit,
+    onSend: (String, List<ComposerMention>, List<ComposerImageAttachment>, Boolean) -> Unit,
     onStop: () -> Unit,
     onLoadOlderHistory: () -> Unit,
     onCompactThread: () -> Unit,
@@ -782,7 +779,6 @@ private fun WorkspaceContent(
     onReloadMcpServers: () -> Unit,
     onStartMcpLogin: (String) -> Unit,
     onSubmitFeedback: (String, String) -> Unit,
-    onShowGoalRequirement: () -> Unit,
     onSetGoal: (String) -> Unit,
     onSetGoalStatus: (ThreadGoalStatus) -> Unit,
     onClearGoal: () -> Unit,
@@ -936,10 +932,7 @@ private fun WorkspaceContent(
                                 onLoadMcpStatus()
                             },
                             onOpenFeedback = { showFeedbackDialog = true },
-                            onOpenGoal = {
-                                if (state.selectedThreadId == null) onShowGoalRequirement()
-                                else showGoalEditor = true
-                            },
+                            onEditGoal = { showGoalEditor = true },
                             onSetGoalStatus = onSetGoalStatus,
                             onClearGoal = onClearGoal,
                             onShowStatus = {
@@ -1476,7 +1469,29 @@ private fun TimelineRow(item: TimelineItem, modifier: Modifier) {
                 color = MaterialTheme.colorScheme.surfaceVariant,
                 shape = RoundedCornerShape(7.dp),
             ) {
-                SelectionContainer { Text(item.body, Modifier.padding(horizontal = 14.dp, vertical = 11.dp), style = MaterialTheme.typography.bodyLarge) }
+                Column(Modifier.padding(horizontal = 14.dp, vertical = 11.dp)) {
+                    SelectionContainer { Text(item.body, style = MaterialTheme.typography.bodyLarge) }
+                    if (item.isGoal) {
+                        Spacer(Modifier.height(7.dp))
+                        Row(
+                            modifier = Modifier.testTag("timeline-goal-${item.id}"),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Icon(
+                                Icons.Outlined.Flag,
+                                contentDescription = null,
+                                modifier = Modifier.size(14.dp),
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            Spacer(Modifier.width(5.dp))
+                            Text(
+                                "作为目标发送",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                }
             }
         }
         TimelineKind.AGENT -> Column(modifier) {
@@ -1861,7 +1876,7 @@ private fun String.isEscapedAt(index: Int): Boolean {
 @Composable
 private fun Composer(
     state: AppUiState,
-    onSend: (String, List<ComposerMention>, List<ComposerImageAttachment>) -> Unit,
+    onSend: (String, List<ComposerMention>, List<ComposerImageAttachment>, Boolean) -> Unit,
     onStop: () -> Unit,
     onCompactThread: () -> Unit,
     onForkThread: () -> Unit,
@@ -1869,7 +1884,7 @@ private fun Composer(
     onRunInit: () -> Unit,
     onOpenMcpStatus: () -> Unit,
     onOpenFeedback: () -> Unit,
-    onOpenGoal: () -> Unit,
+    onEditGoal: () -> Unit,
     onSetGoalStatus: (ThreadGoalStatus) -> Unit,
     onClearGoal: () -> Unit,
     onShowStatus: () -> Unit,
@@ -1895,6 +1910,7 @@ private fun Composer(
     var modelSettingsPage by remember(state.selectedThreadId) { mutableStateOf(ModelSettingsPage.ROOT) }
     var addMenuOpen by remember(state.selectedThreadId) { mutableStateOf(false) }
     var showRemotePathPicker by remember(state.selectedThreadId) { mutableStateOf(false) }
+    var goalModeActive by remember(state.selectedThreadId) { mutableStateOf(false) }
     var policyMenu by remember { mutableStateOf(false) }
     val context = LocalContext.current
     val composerScope = rememberCoroutineScope()
@@ -1923,6 +1939,7 @@ private fun Composer(
     val addMenuPlugins = state.plugins.filter { it.enabled }
     val planModeAvailable = state.collaborationModes.any { it.mode == "plan" }
     val trigger = findComposerTrigger(text.text, text.selection.start)
+    val inlineGoalObjective = extractGoalSlashObjective(text.text)?.takeIf(String::isNotBlank)
     val allSlashCommands = (
         desktopSlashCommands(hasThread = state.selectedThreadId != null) +
             selectedModel?.serviceTiers.orEmpty().map { tier ->
@@ -2011,6 +2028,11 @@ private fun Composer(
         )).distinctBy { "${it.kind}:${it.path}" }
     }
 
+    fun activateGoalMode() {
+        goalModeActive = true
+        if (state.selectedCollaborationMode == "plan") onSetCollaborationMode("default")
+    }
+
     fun executeSlashCommand(command: SlashCommand) {
         when (command.action) {
             SlashCommandAction.MODEL -> {
@@ -2029,6 +2051,7 @@ private fun Composer(
             }
             SlashCommandAction.PLAN_MODE -> {
                 replaceTrigger("")
+                goalModeActive = false
                 onSetCollaborationMode("plan")
             }
             SlashCommandAction.PERMISSIONS -> {
@@ -2077,7 +2100,7 @@ private fun Composer(
             }
             SlashCommandAction.GOAL -> {
                 replaceTrigger("")
-                onOpenGoal()
+                activateGoalMode()
             }
             SlashCommandAction.NEW_TASK -> {
                 replaceTrigger("")
@@ -2120,7 +2143,7 @@ private fun Composer(
                 GoalBar(
                     goal = goal,
                     loading = state.isGoalLoading,
-                    onEdit = onOpenGoal,
+                    onEdit = onEditGoal,
                     onSetStatus = onSetGoalStatus,
                     onClear = onClearGoal,
                 )
@@ -2199,7 +2222,11 @@ private fun Composer(
                             Box(Modifier.fillMaxWidth()) {
                                 if (text.text.isEmpty()) {
                                     Text(
-                                        "Ask Codex",
+                                        if (goalModeActive) {
+                                            "描述你的目标，最好包含可衡量的结果"
+                                        } else {
+                                            "Ask Codex"
+                                        },
                                         style = MaterialTheme.typography.bodyLarge,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                                     )
@@ -2256,10 +2283,11 @@ private fun Composer(
                                 },
                                 onOpenGoal = {
                                     addMenuOpen = false
-                                    onOpenGoal()
+                                    activateGoalMode()
                                 },
                                 onPlanMode = {
                                     addMenuOpen = false
+                                    goalModeActive = false
                                     onSetCollaborationMode("plan")
                                 },
                                 onMention = { option ->
@@ -2289,6 +2317,18 @@ private fun Composer(
                                         onSetPermissionProfile(it)
                                         policyMenu = false
                                     },
+                                )
+                            }
+                            if (goalModeActive) {
+                                Spacer(Modifier.width(5.dp))
+                                Box(
+                                    Modifier.width(1.dp).height(18.dp)
+                                        .background(MaterialTheme.colorScheme.outlineVariant),
+                                )
+                                Spacer(Modifier.width(3.dp))
+                                GoalModeIndicator(
+                                    onClear = { goalModeActive = false },
+                                    modifier = Modifier.testTag("composer-goal-marker"),
                                 )
                             }
                         }
@@ -2368,17 +2408,31 @@ private fun Composer(
                                             executeSlashCommand(exactCommand)
                                             text = TextFieldValue()
                                         } else {
-                                            onSend(text.text, selectedMentions, attachments)
+                                            val submittedText = inlineGoalObjective ?: text.text
+                                            val submittedMentions = selectedMentions
+                                            val submittedAttachments = attachments
+                                            val submitAsGoal = goalModeActive || inlineGoalObjective != null
                                             text = TextFieldValue()
                                             selectedMentions = emptyList()
                                             attachments = emptyList()
                                             attachmentError = null
                                             mentionKindFilter = null
+                                            goalModeActive = false
+                                            onSend(
+                                                submittedText,
+                                                submittedMentions,
+                                                submittedAttachments,
+                                                submitAsGoal,
+                                            )
                                         }
                                     }
                                 },
-                                enabled = (text.text.isNotBlank() || attachments.isNotEmpty()) &&
-                                    (!state.isTurnRunning || state.activeTurnId != null),
+                                enabled = if (goalModeActive || inlineGoalObjective != null) {
+                                    text.text.isNotBlank() && !state.isTurnRunning && !state.isGoalLoading
+                                } else {
+                                    (text.text.isNotBlank() || attachments.isNotEmpty()) &&
+                                        (!state.isTurnRunning || state.activeTurnId != null)
+                                },
                                 modifier = Modifier.testTag("composer-send"),
                             ) {
                                 Icon(
@@ -3597,6 +3651,42 @@ private fun CompactComposerMenuButton(
     }
 }
 
+@Composable
+private fun GoalModeIndicator(
+    onClear: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Row(
+        modifier = modifier.height(32.dp)
+            .clip(RoundedCornerShape(5.dp))
+            .clickable(onClick = onClear)
+            .padding(horizontal = 7.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Icon(
+            Icons.Outlined.Flag,
+            contentDescription = "取消目标标记",
+            modifier = Modifier.size(15.dp),
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Spacer(Modifier.width(5.dp))
+        Text(
+            "目标",
+            style = MaterialTheme.typography.labelMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1,
+        )
+    }
+}
+
+internal fun extractGoalSlashObjective(text: String): String? {
+    val trimmed = text.trimStart()
+    if (!trimmed.startsWith("/goal", ignoreCase = true)) return null
+    val suffix = trimmed.drop(5)
+    if (suffix.isNotEmpty() && !suffix.first().isWhitespace()) return null
+    return suffix.trim()
+}
+
 internal enum class SlashCommandAction {
     MODEL, REASONING, SERVICE_TIER, PLAN_MODE, PERMISSIONS, SKILLS, PLUGINS, RENAME, ARCHIVE, COMPACT,
     FORK, REVIEW, INIT, MCP, FEEDBACK,
@@ -3627,7 +3717,7 @@ internal fun desktopSlashCommands(hasThread: Boolean): List<SlashCommand> = buil
     add(SlashCommand("permissions", "Change approval behavior", Icons.Outlined.Tune, SlashCommandAction.PERMISSIONS))
     add(SlashCommand("skills", "Mention a remote skill", Icons.Outlined.Psychology, SlashCommandAction.SKILLS))
     add(SlashCommand("plugins", "Mention an installed remote plugin", Icons.Outlined.Extension, SlashCommandAction.PLUGINS))
-    add(SlashCommand("goal", "Set or manage the goal for this task", Icons.Outlined.Flag, SlashCommandAction.GOAL))
+    add(SlashCommand("goal", "Set the next message as this task's goal", Icons.Outlined.Flag, SlashCommandAction.GOAL))
     add(SlashCommand("init", "Create AGENTS.md instructions for this project", Icons.Outlined.Description, SlashCommandAction.INIT))
     add(SlashCommand("mcp", "Show remote MCP server status", Icons.Outlined.Hub, SlashCommandAction.MCP))
     add(SlashCommand("feedback", "Send feedback about this task", Icons.Outlined.ErrorOutline, SlashCommandAction.FEEDBACK))

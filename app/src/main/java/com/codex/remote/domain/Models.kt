@@ -348,6 +348,7 @@ data class TimelineItem(
     val status: String = "",
     val expanded: Boolean = false,
     val fileChanges: List<FileChangeSummary> = emptyList(),
+    val isGoal: Boolean = false,
 )
 
 data class FileChangeSummary(

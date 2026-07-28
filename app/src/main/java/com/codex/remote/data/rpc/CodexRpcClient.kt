@@ -1307,6 +1307,7 @@ class CodexRpcClient(
                             else -> null
                         }
                     }.joinToString("\n"),
+                    isGoal = item.boolean("goal"),
                 )
                 "agentMessage" -> TimelineItem(id, TimelineKind.AGENT, body = item.string("text").orEmpty())
                 "reasoning" -> TimelineItem(

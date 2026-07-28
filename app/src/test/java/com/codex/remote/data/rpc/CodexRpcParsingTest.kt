@@ -25,6 +25,17 @@ class CodexRpcParsingTest {
     }
 
     @Test
+    fun preservesGoalMetadataOnUserMessagesWhenProvided() {
+        val item = parse(
+            """{"type":"userMessage","id":"goal-1","goal":true,"content":[{"type":"text","text":"Ship it"}]}""",
+        )
+
+        assertEquals(TimelineKind.USER, item?.kind)
+        assertEquals("Ship it", item?.body)
+        assertTrue(item?.isGoal == true)
+    }
+
+    @Test
     fun parsesCommandWithAggregatedOutput() {
         val item = parse(
             """{"type":"commandExecution","id":"cmd-1","command":"git status --short","cwd":"/repo","status":"completed","aggregatedOutput":" M app.kt\n","exitCode":0}""",

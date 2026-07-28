@@ -58,7 +58,6 @@ fun CodexRemoteApp(viewModel: AppViewModel) {
             onStartMcpLogin = viewModel::startMcpLogin,
             onMcpAuthorizationHandled = viewModel::clearMcpAuthorizationUrl,
             onSubmitFeedback = viewModel::submitFeedback,
-            onShowGoalRequirement = viewModel::showGoalRequirement,
             onSetGoal = viewModel::setThreadGoal,
             onSetGoalStatus = viewModel::setThreadGoalStatus,
             onClearGoal = viewModel::clearThreadGoal,

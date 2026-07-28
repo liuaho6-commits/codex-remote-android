@@ -276,6 +276,9 @@ val answer = 42
         )
         show(state)
         composeRule.onNodeWithTag(COMPOSER_INPUT).performTextInput("draft-a")
+        composeRule.onNodeWithTag(COMPOSER_ADD).performClick()
+        composeRule.onNodeWithText("目标").assertIsDisplayed().performClick()
+        composeRule.onNodeWithTag(COMPOSER_GOAL_MARKER).assertExists()
 
         composeRule.runOnIdle {
             state.value = state.value.copy(
@@ -291,6 +294,7 @@ val answer = 42
         composeRule.onNodeWithText("thread-b-body-29").assertExists()
         composeRule.onNodeWithText("thread-a-body").assertDoesNotExist()
         composeRule.onAllNodesWithTag(CONVERSATION_BOTTOM_BUTTON).assertCountEquals(0)
+        composeRule.onAllNodesWithTag(COMPOSER_GOAL_MARKER).assertCountEquals(0)
         assertFalse(composerText().contains("draft-a"))
         composeRule.runOnIdle {
             assertTrue(state.value.acceptsThreadEvent("thread-b"))
@@ -300,7 +304,7 @@ val answer = 42
     }
 
     @Test
-    fun addMenuProvidesGoalPlanSkillsAndPluginsWithoutRpcErrorText() {
+    fun addMenuUsesDismissibleGoalMarkerAndStillProvidesPlanSkillsAndPlugins() {
         val state = mutableStateOf(
             baseState().copy(
                 skills = listOf(RemoteSkill("qa-check", "QA Skill", "Device test skill", "/skills/qa/SKILL.md", true, setOf("/workspace/demo"))),
@@ -308,30 +312,29 @@ val answer = 42
             ),
         )
         val callbacks = WorkspaceCallbacks()
-        callbacks.onSetGoal = { objective ->
-            callbacks.goalObjective = objective
-            state.value = state.value.copy(
-                threadGoal = goal(objective),
-                isGoalLoading = false,
-                goalError = null,
-            )
-        }
         show(state, callbacks)
 
         composeRule.onNodeWithTag(COMPOSER_ADD).performClick()
         composeRule.onNodeWithText("目标").assertIsDisplayed().performClick()
         composeRule.onAllNodesWithText("Unsupported method", substring = true).assertCountEquals(0)
-        composeRule.onNodeWithTag(GOAL_INPUT).performTextInput("ship-device-tests")
-        composeRule.onNodeWithText("Save").performClick()
-        composeRule.waitUntil(5_000) {
-            composeRule.onAllNodesWithText("ship-device-tests").fetchSemanticsNodes().isNotEmpty()
-        }
-        assertEquals("ship-device-tests", callbacks.goalObjective)
-        composeRule.onNodeWithText("Goal · Active").assertExists()
+        composeRule.onNodeWithTag(COMPOSER_GOAL_MARKER).assertIsDisplayed().performClick()
+        composeRule.onAllNodesWithTag(COMPOSER_GOAL_MARKER).assertCountEquals(0)
 
+        composeRule.onNodeWithTag(COMPOSER_ADD).performClick()
+        composeRule.onNodeWithText("目标").assertIsDisplayed().performClick()
+        composeRule.onNodeWithTag(COMPOSER_INPUT).performTextInput("ship-device-tests")
+        composeRule.onNodeWithTag(COMPOSER_SEND).performClick()
+        composeRule.runOnIdle {
+            assertEquals(listOf("ship-device-tests" to true), callbacks.sentMessages)
+        }
+        composeRule.onAllNodesWithTag(COMPOSER_GOAL_MARKER).assertCountEquals(0)
+
+        composeRule.onNodeWithTag(COMPOSER_ADD).performClick()
+        composeRule.onNodeWithText("目标").assertIsDisplayed().performClick()
         composeRule.onNodeWithTag(COMPOSER_ADD).performClick()
         composeRule.onNodeWithText("计划模式").assertIsDisplayed().performClick()
         assertEquals("plan", callbacks.collaborationMode)
+        composeRule.onAllNodesWithTag(COMPOSER_GOAL_MARKER).assertCountEquals(0)
 
         composeRule.onNodeWithTag(COMPOSER_ADD).performClick()
         composeRule.onNodeWithText("QA Skill").performScrollTo().performClick()
@@ -339,6 +342,76 @@ val answer = 42
         composeRule.onNodeWithTag(COMPOSER_ADD).performClick()
         composeRule.onNodeWithText("QA Plugin").performScrollTo().performClick()
         assertTrue(composerText().contains("${'$'}qa-plugin"))
+    }
+
+    @Test
+    fun goalSlashCommandActivatesTheSameMarkerAndOnlyMarksTheNextSend() {
+        val state = mutableStateOf(baseState())
+        val callbacks = WorkspaceCallbacks()
+        show(state, callbacks)
+
+        composeRule.onNodeWithTag(COMPOSER_INPUT).performTextInput("/goal")
+        composeRule.onNodeWithTag(COMPOSER_SEND).performClick()
+        composeRule.onNodeWithTag(COMPOSER_GOAL_MARKER).assertIsDisplayed()
+        composeRule.runOnIdle { assertTrue(callbacks.sentMessages.isEmpty()) }
+
+        composeRule.onNodeWithTag(COMPOSER_INPUT).performTextInput("finish-device-coverage")
+        composeRule.onNodeWithTag(COMPOSER_SEND).performClick()
+        composeRule.onAllNodesWithTag(COMPOSER_GOAL_MARKER).assertCountEquals(0)
+        assertEquals("", composerText())
+
+        composeRule.onNodeWithTag(COMPOSER_INPUT).performTextInput("normal-follow-up")
+        composeRule.onNodeWithTag(COMPOSER_SEND).performClick()
+        assertEquals("", composerText())
+        composeRule.onNodeWithTag(COMPOSER_INPUT).performTextInput("/goal inline-objective")
+        composeRule.onNodeWithTag(COMPOSER_SEND).performClick()
+
+        composeRule.runOnIdle {
+            assertEquals(
+                listOf(
+                    "finish-device-coverage" to true,
+                    "normal-follow-up" to false,
+                    "inline-objective" to true,
+                ),
+                callbacks.sentMessages,
+            )
+        }
+    }
+
+    @Test
+    fun goalMarkerWorksBeforeTheRemoteThreadExists() {
+        val state = mutableStateOf(baseState(threads = emptyList()).copy(selectedThreadId = null))
+        val callbacks = WorkspaceCallbacks()
+        show(state, callbacks)
+
+        composeRule.onNodeWithTag(COMPOSER_ADD).performClick()
+        composeRule.onNodeWithText("目标").assertIsDisplayed().performClick()
+        composeRule.onNodeWithTag(COMPOSER_GOAL_MARKER).assertIsDisplayed()
+        composeRule.onNodeWithTag(COMPOSER_INPUT).performTextInput("create-thread-with-goal")
+        composeRule.onNodeWithTag(COMPOSER_SEND).performClick()
+
+        composeRule.runOnIdle {
+            assertEquals(listOf("create-thread-with-goal" to true), callbacks.sentMessages)
+        }
+        composeRule.onAllNodesWithText("请先发送第一条消息", substring = true).assertCountEquals(0)
+        composeRule.onAllNodesWithTag(COMPOSER_GOAL_MARKER).assertCountEquals(0)
+    }
+
+    @Test
+    fun goalMessagesAreVisiblyDistinguishedFromNormalMessages() {
+        val state = mutableStateOf(
+            baseState(
+                timeline = listOf(
+                    TimelineItem("goal-message", TimelineKind.USER, body = "ship it", isGoal = true),
+                    TimelineItem("normal-message", TimelineKind.USER, body = "status update"),
+                ),
+            ),
+        )
+        show(state)
+
+        composeRule.onNodeWithTag("timeline-goal-goal-message").assertExists()
+        composeRule.onNodeWithText("作为目标发送").assertExists()
+        composeRule.onAllNodesWithTag("timeline-goal-normal-message").assertCountEquals(0)
     }
 
     @Test
@@ -404,7 +477,6 @@ val answer = 42
                     onStartMcpLogin = {},
                     onMcpAuthorizationHandled = {},
                     onSubmitFeedback = { _, _ -> },
-                    onShowGoalRequirement = {},
                     onSetGoal = callbacks.onSetGoal,
                     onSetGoalStatus = {},
                     onClearGoal = {},
@@ -501,11 +573,12 @@ class RemoteStateDeviceTest {
 private class WorkspaceCallbacks {
     var collaborationMode: String? = null
     var permissionMode: PermissionMode? = null
-    var goalObjective: String? = null
+    val sentMessages = mutableListOf<Pair<String, Boolean>>()
     var olderLoads: Int = 0
     var onLoadOlder: () -> Unit = {}
-    var onSetGoal: (String) -> Unit = { goalObjective = it }
-    var onSend: (String, List<ComposerMention>, List<ComposerImageAttachment>) -> Unit = { _, _, _ -> }
+    var onSetGoal: (String) -> Unit = {}
+    var onSend: (String, List<ComposerMention>, List<ComposerImageAttachment>, Boolean) -> Unit =
+        { text, _, _, asGoal -> sentMessages += text.trim() to asGoal }
 }
 
 private fun baseState(
@@ -547,7 +620,7 @@ private fun baseState(
         threads = threads,
         projects = listOf(project),
         selectedProjectPath = project.path,
-        selectedThreadId = threads.first().id,
+        selectedThreadId = threads.firstOrNull()?.id,
         timeline = timeline,
         models = listOf(model),
         selectedModel = model.id,
@@ -604,4 +677,4 @@ private const val COMPOSER_PERMISSIONS = "composer-permissions"
 private const val COMPOSER_CONTEXT = "composer-context"
 private const val COMPOSER_MODEL = "composer-model"
 private const val COMPOSER_SEND = "composer-send"
-private const val GOAL_INPUT = "goal-editor-input"
+private const val COMPOSER_GOAL_MARKER = "composer-goal-marker"

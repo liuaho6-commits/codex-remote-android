@@ -27,6 +27,15 @@ class WorkspaceBehaviorTest {
     }
 
     @Test
+    fun goalSlashCommandExtractsOnlyARealGoalPrefix() {
+        assertEquals("Ship release", extractGoalSlashObjective("/goal Ship release"))
+        assertEquals("Ship release", extractGoalSlashObjective("  /GOAL   Ship release  "))
+        assertEquals("", extractGoalSlashObjective("/goal"))
+        assertNull(extractGoalSlashObjective("/goalkeeper is not a command"))
+        assertNull(extractGoalSlashObjective("explain /goal"))
+    }
+
+    @Test
     fun reasoningOnlyAutoExpandsWhileItIsRunning() {
         assertTrue("inProgress".isTimelineItemRunning())
         assertTrue("running".isTimelineItemRunning())

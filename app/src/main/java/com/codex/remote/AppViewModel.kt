@@ -556,6 +556,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         text: String,
         selectedMentions: List<ComposerMention> = emptyList(),
         attachments: List<ComposerImageAttachment> = emptyList(),
+        asGoal: Boolean = false,
     ) {
         val prompt = text.trim()
         if (prompt.isEmpty() && attachments.isEmpty()) return
@@ -564,6 +565,14 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
         val currentState = _state.value
         if (currentState.remoteAccount?.canRunCodex != true) {
             _state.update { it.copy(notice = "远端 Codex 尚未登录") }
+            return
+        }
+        if (asGoal && prompt.isEmpty()) {
+            _state.update { it.copy(notice = "Goal 需要包含文字目标") }
+            return
+        }
+        if (asGoal && currentState.isTurnRunning) {
+            _state.update { it.copy(notice = "当前任务运行期间不能设置 Goal") }
             return
         }
         val selectedModel = currentState.selectedModel
@@ -605,8 +614,17 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                         append("[Image: ${attachment.displayName}]")
                     }
                 },
+                isGoal = asGoal,
             )
-            _state.update { it.copy(timeline = it.timeline + userItem, isTurnRunning = true, notice = null) }
+            _state.update {
+                it.copy(
+                    timeline = it.timeline + userItem,
+                    isTurnRunning = if (asGoal) it.isTurnRunning else true,
+                    isGoalLoading = if (asGoal) true else it.isGoalLoading,
+                    goalError = if (asGoal) null else it.goalError,
+                    notice = null,
+                )
+            }
             runCatching {
                 if (steeringThreadId != null && steeringTurnId != null) {
                     client.steerTurn(
@@ -638,6 +656,21 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                     }
                     started.id
                 }
+                if (asGoal) {
+                    val goal = client.setThreadGoal(
+                        threadId = threadId,
+                        objective = prompt,
+                        status = ThreadGoalStatus.ACTIVE,
+                    )
+                    _state.update { state ->
+                        if (state.selectedThreadId == threadId) {
+                            state.copy(threadGoal = goal, isGoalLoading = false, goalError = null)
+                        } else {
+                            state
+                        }
+                    }
+                    return@runCatching
+                }
                 client.startTurn(
                     threadId = threadId,
                     text = prompt,
@@ -660,11 +693,19 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
                 _state.update {
                     it.copy(
                         timeline = it.timeline.filterNot { item -> item.id == localItemId },
-                        isTurnRunning = steeringThreadId != null,
-                        activeTurnId = if (steeringThreadId != null) it.activeTurnId else null,
+                        isTurnRunning = if (asGoal) it.isTurnRunning else steeringThreadId != null,
+                        activeTurnId = if (asGoal || steeringThreadId != null) it.activeTurnId else null,
+                        isGoalLoading = if (asGoal) false else it.isGoalLoading,
+                        goalError = if (asGoal) friendlyGoalError(error) else it.goalError,
                     )
                 }
-                showError(error)
+                if (asGoal) {
+                    _state.update {
+                        it.copy(notice = "Failed to set goal: ${friendlyGoalError(error)}")
+                    }
+                } else {
+                    showError(error)
+                }
             }
         }
     }
